@@ -1,0 +1,466 @@
+setwd("C:/Users/tisra/Desktop/Phd Code/12. Paper 2023/1. Model Measure Old data/GLM+ Output")
+library(locfit)
+library(Metrics)
+library(ISLR)
+library(h2o)
+library(tidyr)
+library(tibble)
+library(insurancerating)
+library(evtree)
+library(mgcv)
+require(MASS)
+library(CASdatasets)
+require(stats)
+library(data.table)
+library(plyr)
+library(dplyr)
+library(purrr)
+library(rpart)
+library(rpart.plot)
+library(Hmisc)
+library(glmnet)
+library(dplyr)
+data(freMTPL2freq)
+data(freMTPL2sev)
+library("wesanderson")
+library(statmod)
+library(scales)
+data(pg17trainpol)
+data(pg17trainclaim)
+data(pg17testyear1)
+data(pg17testyear2)
+data(pg17testyear3)
+data(pg17testyear4)
+data(fredpt17)
+library(ggcorrplot)
+library(ggplot2)
+
+####### Importing data 
+####### Importing data 
+###### Importing aggregated Freq sev in the training data 
+library(locfit)
+library(Metrics)
+library(ISLR)
+library(h2o)
+require(MASS)
+library(CASdatasets)
+require(stats)
+library(data.table)
+library(plyr)
+library(rpart)
+library(rpart.plot)
+library(Hmisc)
+library(glmnet)
+library(dplyr)
+data(freMTPL2freq)
+data(freMTPL2sev)
+library("wesanderson")
+library(statmod)
+library(scales)
+
+##################################################
+clrpal = wes_palette("Zissou1", 22, type = "continuous")
+clrpallow = scales::alpha(clrpal,.4)
+bleurouge = clrpal[c(1,22)]
+bleurougepal = clrpallow[c(1,22)]
+colr= clrpal4 = wes_palette("Darjeeling1")[c(1,2,3,5)]
+clrpal6 = wes_palette("Zissou1", 6, type = "continuous")
+### Initial data call 
+#### Aggreagating the two datasets together
+freMTPL2sev_tot = aggregate(freMTPL2sev$ClaimAmount,
+                            by=list(freMTPL2sev$IDpol),
+                            FUN = sum)
+names(freMTPL2sev_tot)=names(freMTPL2sev)
+freMTPL2 = merge(freMTPL2freq,freMTPL2sev_tot,all.x=TRUE)
+freMTPL2$ClaimAmount[is.na(freMTPL2$ClaimAmount)]=0
+
+#### Limiting to only high Exposure policies 
+freMTPL2 = freMTPL2[(freMTPL2$Exposure>.8)&(freMTPL2$Exposure<=1),]
+##### Removing all large claim values 
+freMTPL2 = freMTPL2[freMTPL2$ClaimAmount<=10000,]
+dat_freq=freMTPL2  
+dat_freq_nonzero = dat_freq[dat_freq$ClaimAmount!=0,]
+dat_freq_zero = dat_freq[dat_freq$ClaimAmount==0,]
+dim(dat_freq_zero)
+n_dat_freq_zero=nrow(dat_freq_zero)
+set.seed(1001)
+keep_in= sample(1:n_dat_freq_zero, size=.4*n_dat_freq_zero, replace=FALSE)
+dat_freq_zero_keep= dat_freq_zero[keep_in,]  
+dat_freq= rbind(dat_freq_nonzero,dat_freq_zero_keep)  
+dim(dat_freq) 
+#########################################################################################  
+######## Replacing the FreqMTPL2 label to dat_freq that we commonly use in other code
+######## Note dat_freq has both frequemcy and severity data 
+freMTPL2_backup = freMTPL2
+####### Making adjustments to data 
+dat_freq$VehGas <- factor(dat_freq$VehGas)    # consider VehGas as categorical
+dat_freq$ClaimNb <- pmin(dat_freq$ClaimNb, 4)   # correct for unreasonable observations (that might be data error)
+dat_freq$Exposure <- pmin(dat_freq$Exposure, 1) # correct for unreasonable observations (that might be data error)
+dat_freq$Area <- as.factor(dat_freq$Area)   ### Area as factor 
+dat_freq$VehPower <- as.factor(pmin(dat_freq$VehPower,9))
+dat_freq$BonusMalus <- as.integer(pmin(dat_freq$BonusMalus, 150))
+dat_freq$Density <- as.numeric(log(dat_freq$Density))
+
+############## Removing Severity data 
+dat_freq_temp= dat_freq[dat_freq$ClaimAmount!=0,]
+ID_Exclude1 = dat_freq_temp$IDpol[which(dat_freq_temp$ClaimAmount<100)]
+ID_Exclude2 = dat_freq_temp$IDpol[which(dat_freq_temp$ClaimAmount %in% c(1204, 1128.12,1172,1128))]
+dat_freq= dat_freq[-which(dat_freq$IDpol %in% c(ID_Exclude1,ID_Exclude2)),]
+##### Shuffling the data
+n_freq = nrow(dat_freq)
+set.seed(100)
+reord_freq = sample(1:n_freq, size=n_freq, replace=FALSE)
+dat_freq = dat_freq[reord_freq, ] 
+dat_freq$ClaimNb=as.numeric(dat_freq$ClaimNb)
+
+features.freq <- setdiff( 1:length(dat_freq) ,  grep("drv_age_lic_avg|id_policy|drv_sex2|vh_make|
+      vh_make|drv_age2|drv_age_lic2|vh_din|vh_sale_begin|vh_sale_end|ClaimAmount|drv_age_avg|Exposure|ClaimNb|
+      drv_age_lic_avg|vh_cyl", names(dat_freq)))
+
+set.seed(1001)
+split1= sample(1:n_freq, size=.833*n_freq, replace=FALSE)
+CV_data_freq = dat_freq[split1,]
+test_data_freq = dat_freq[-split1,]
+sum(CV_data_freq$ClaimAmount)/nrow(CV_data_freq)
+sum(test_data_freq$ClaimAmount)/nrow(test_data_freq)
+
+dev_poiss <- function(ytrue, ypred, wcase) -2 * weighted.mean(dpois(ytrue, ypred, log = TRUE) - dpois(ytrue, ytrue, log = TRUE), wcase, na.rm = TRUE)
+dev_gamma <- function(ytrue, ypred, wcase) -2 * weighted.mean(log(ytrue/ypred) - ((ytrue - ypred) / ypred), wcase, na.rm = TRUE)
+dim(dat_freq)
+  
+##### CV for freq#####
+  K=5
+  n = nrow(CV_data_freq)
+  folds = cut(1:n, K, labels=FALSE)
+  err.internal.freq = err.out.freq = numeric(5)
+  err.cv.out = matrix("NA",5,5)
+  valid_pred = cp.opt = numeric(K)
+  err.cv.in.fin= err.cv.out.fin = matrix(NA,5,10)
+
+for (t in 1:p) {
+    ## re shufling CV data
+    n_CV_freq = nrow(CV_data_freq)
+    reord_CVfreq = sample(1:n_CV_freq, size=n_CV_freq, replace=FALSE)
+    CV_data_freq = CV_data_freq[reord_CVfreq, ]
+
+ for (a in 1:K) {
+    i = which(folds==a)
+    ####Interaction code starts here 
+    interact.data=CV_data_freq   #[i,]
+    not.interact.data=CV_data_freq[-i,]
+
+
+    glm_inter_test= glm(ClaimNb~Area+VehPower+VehAge+DrivAge+BonusMalus+VehBrand+VehGas+Density+Region,
+                  data=interact.data, offset=log(Exposure), family=poisson())
+
+
+    glm_interaction=stepAIC(glm_inter_test,~.^2,trace = FALSE)
+   formula=glm_interaction$formula
+    print(formula)
+   coeff=glm_interaction$coefficients
+ ####  After removing the internal data
+    n_internal=nrow(not.interact.data)
+    folds_internal = cut(1:n_internal, K, labels=FALSE)
+    j = which(folds_internal==a)
+    ###### Interaction code ends here 
+
+    vtrain.data.freq=CV_data_freq[-i,]
+    valid.data.freq=CV_data_freq[i,]
+
+
+    Ntr = nrow(vtrain.data.freq)
+    Ktr = 5
+    err.out.freq = numeric(5)
+
+    glm_freq_cv= glm(formula,
+                     data=vtrain.data.freq, offset=log(Exposure), family=poisson())
+
+
+      valid_pred_fin <- predict(glm_freq_cv, newdata = valid.data.freq, type="response")
+    err.cv.out.fin[a,t]=dev_poiss(valid.data.freq$ClaimNb,valid_pred_fin,valid.data.freq$Exposure)
+
+    internal_pred_fin <- fitted(glm_freq_cv)
+    err.cv.in.fin[a,t]=dev_poiss(vtrain.data.freq$ClaimNb,internal_pred_fin,vtrain.data.freq$Exposure)
+  }
+}
+
+  write.csv(err.cv.out.fin,"err.cv.out.fin.csv")
+  write.csv(err.cv.in.fin,"err.cv.in.fin.csv")
+
+###### CV frequency ends here #####   
+  # freq_cv=cbind(err.cv.in.fin,err.cv.out.fin)
+  # write.csv(freq_cv,"freq_cv.csv")
+  
+  # glm_freq= glm(ClaimNb~factor(pol_pay_freq)+factor(pol_payd)+factor(pol_usage)+
+  #                 factor(drv_drv2)+factor(drv_sex1)+factor(vh_fuel)+
+  #                 factor(vh_type)+(pol_duration)+(pol_sit_duration)+(drv_age1)+
+  #                 (drv_age_lic1)+(vh_age)+
+  #                 (vh_speed)+(vh_value)+(vh_weight) +(Density)+ 
+  #                 (pol_bonus)+ factor(pol_coverage),
+  #               data=CV_data_freq, offset=log(Exposure), family=poisson())
+  # summary(glm_freq)
+
+  # glm_step=stepAIC(glm_freq,~.,trace = FALSE)
+  # glm_step$formula
+  # summary(glm_step)
+  # glm_interaction=stepAIC(glm_freq,~.^2,trace = FALSE)
+  # formula=glm_interaction$formula
+  # summary(glm_interaction)
+  # print(formula)
+  # 
+  
+  glm_freq= glm(ClaimNb ~ VehPower + VehAge + DrivAge + BonusMalus + VehBrand + 
+                  VehGas + Density + Region + DrivAge:Region + DrivAge:BonusMalus + 
+                  VehAge:VehBrand + BonusMalus:Density + DrivAge:Density + 
+                  VehPower:BonusMalus + VehAge:VehGas
+                 ,data=CV_data_freq, offset=log(Exposure), family=poisson())
+
+  summary(glm_freq)
+
+##### Variable imp 
+  h2o.init()
+  CV_data_freq$offset= log(CV_data_freq$Exposure)
+  h2o_CV_data_freq= as.h2o(CV_data_freq)
+  
+  GLM_freq_final = h2o.glm(training_frame = h2o_CV_data_freq, x =c ("Area","VehPower","VehAge","DrivAge",
+              "BonusMalus","VehBrand","VehGas","Density","Region") , y = "ClaimNb", 
+                            family='poisson',link="log", 
+                           offset_column = 'offset')
+  
+  
+    freq_varimp= h2o.varimp(GLM_freq_final)
+  write.csv(freq_varimp,"freq_varimp.csv")
+  
+h2o.varimp(glm_freq)
+  GLM.internal.freq <-fitted(glm_freq)
+
+# min(GLM.internal.freq)
+GLM.internal.freq.error =dev_poiss(CV_data_freq$ClaimNb,GLM.internal.freq,CV_data_freq$Exposure)
+Predicted.value.GLM.freq<- predict(glm_freq, newdata = test_data_freq, type="response")
+
+GLM.out.freq.err =dev_poiss(test_data_freq$ClaimNb,Predicted.value.GLM.freq,test_data_freq$Exposure)
+final_freq=cbind(GLM.internal.freq.error,GLM.out.freq.err)
+write.csv(final_freq,"final_freq.csv")
+
+######### Boot 632 for external error ######
+## Boot 632 of the external error
+dat_freq
+n_freq=nrow(test_data_freq)
+boot632_err_outfreq=err_oob_outfreq=inbag_err_freqout=numeric(250)
+
+for (t in 1:250) {
+  ib = sample(1:n_freq, size=1*n_freq, replace=TRUE)
+  inbag_sample_outfreq=test_data_freq[ib,]
+  
+  pred_inbag_outfreq <- predict(glm_freq, newdata=inbag_sample_outfreq, type="response")
+  inbag_err_freqout[t] =dev_poiss(inbag_sample_outfreq$ClaimNb,pred_inbag_outfreq,inbag_sample_outfreq$Exposure)
+  
+  #### oob errror prediction
+  
+  oob_outfreq= which(!(test_data_freq$IDpol %in% inbag_sample_outfreq$IDpol))     
+  oob_sample_outfreq= test_data_freq[oob_outfreq,]
+  
+  pred_oob_outfreq <- predict(glm_freq, newdata=oob_sample_outfreq,type="response")
+  err_oob_outfreq[t] =dev_poiss(oob_sample_outfreq$ClaimNb,pred_oob_outfreq,oob_sample_outfreq$Exposure)
+  
+  boot632_err_outfreq [t] = 0.368 * err_oob_outfreq[t] + 0.632 * inbag_err_freqout[t]
+  
+}
+
+bootstrap_freqout=cbind(boot632_err_outfreq,err_oob_outfreq,inbag_err_freqout)
+write.csv(bootstrap_freqout,"bootstrap_freqout.csv")
+range_freqout= cbind(quantile(boot632_err_outfreq,0.025),quantile(boot632_err_outfreq,0.975))
+
+#### Severity GLM ##############################################################################################
+#### CV severity###############################################################
+dat_freq_nonzero= dat_freq[dat_freq$ClaimAmount!=0,]
+dat_freq_nonzero$Average_claim= as.numeric(dat_freq_nonzero$ClaimAmount/dat_freq_nonzero$ClaimNb)
+n_severity = nrow(dat_freq_nonzero)
+set.seed(1001)
+reord_sev = sample(1:n_severity, size=n_severity, replace=FALSE)
+dat_freq_nonzero = dat_freq_nonzero[reord_sev, ] 
+# save a validation sample for later:
+set.seed(100)
+i.valid_sev = sample(1:n_severity, size=.833*n_severity, replace=FALSE)
+CV_data_sev = dat_freq_nonzero[i.valid_sev,]
+test_data_sev = dat_freq_nonzero[-i.valid_sev,]
+
+#### CV 10 fold severity ############################################
+n_sev = nrow(CV_data_sev)
+K = 5
+folds = cut(1:n_sev, K, labels=FALSE)
+coeff_sev=matrix(NA,nrow=53,ncol=10)
+lam_sev=lam = numeric(K)
+err.internal_sev=err.kfold_sev= matrix(NA,5,10)
+p=10
+
+ for (j in 1:p) {
+  ## re shufling CV data
+  n_CV_sev = nrow(CV_data_sev)
+  reord_CVsev = sample(1:n_CV_sev, size=n_CV_sev, replace=FALSE)
+  CV_data_sev = CV_data_sev[reord_CVsev, ]
+
+ for(t in 1:K){
+  # training sample
+    i = which(folds==t)
+
+    #training sample
+    vtrain_sev = CV_data_sev[-i,]
+
+    # Validation sample
+    valid_sev = CV_data_sev[i,]
+
+    glm_cv_sev <- glm(Average_claim ~Area + VehPower + VehAge + DrivAge + BonusMalus + 
+                        VehBrand + VehGas + Density,
+                      data=vtrain_sev,weight=vtrain_sev$ClaimNb, family=Gamma(link = "log"))
+
+
+    y.internal_sev <- fitted(glm_cv_sev)
+    err.internal_sev[t,j] =dev_gamma(vtrain_sev$Average_claim,y.internal_sev,vtrain_sev$ClaimNb)
+    y.external_sev <- predict(glm_cv_sev, newdata = valid_sev, type="response")
+    err.kfold_sev[t,j]= dev_gamma(valid_sev$Average_claim,y.external_sev,valid_sev$ClaimNb)
+  }
+}
+#############################  CV  for severity over#####################
+
+write.csv(err.internal_sev,"err.internal_sev.csv")
+write.csv(err.kfold_sev,"err.kfold_sev.csv")
+
+### End of CV####
+################## Interaction terms start, 
+# colnames(CV_data_freq)
+# glm_severity <- glm(Average_claim ~Area + VehPower + VehAge + DrivAge + BonusMalus + VehBrand + VehGas + Density + Region
+#                     ,
+#                     data=CV_data_sev,weight=CV_data_sev$ClaimNb, family=Gamma(link = "log"))
+# summary(glm_severity)
+# glm_severity_step=stepAIC(glm_severity,~.,trace = FALSE)
+# glm_severity_step$formula
+# summary(glm_severity_step)
+# step_severity=stepAIC(glm_severity,~.^2,trace = FALSE)
+# step_severity$formula
+###### Interaction terms End
+
+glm_severity= glm(Average_claim ~Area + VehPower + VehAge + DrivAge + BonusMalus + 
+                    VehBrand + VehGas + Density ,
+                 weight=CV_data_sev$ClaimNb, family=Gamma(link = "log"))
+colnames(CV_data_sev)
+summary(glm_severity)
+
+h2o_CV_data_sev=as.h2o(CV_data_sev)
+
+GLM_SEV_final = h2o.glm(training_frame = h2o_CV_data_sev, x =c ("Area","VehPower","VehAge","DrivAge",
+                       "BonusMalus","VehBrand","VehGas","Density") , y = "Average_claim", 
+                         family='gamma',link="log", weight="ClaimNb")
+
+
+sev_varimp= h2o.varimp(GLM_SEV_final)
+write.csv(sev_varimp,"sev_varimp.csv")
+
+GLM.internal.sev <-fitted(glm_severity)
+Predicted.value.GLM.sev<- predict(glm_severity, newdata = test_data_sev, type="response")
+
+GLM.internal.severity.error =dev_gamma(CV_data_sev$Average_claim,GLM.internal.sev,CV_data_sev$ClaimNb)
+GLM.out.severity.err =dev_gamma(test_data_sev$Average_claim,Predicted.value.GLM.sev, test_data_sev$ClaimNb)
+
+final_severity=cbind(GLM.internal.severity.error,GLM.out.severity.err)
+write.csv(final_severity,"final_severity.csv")
+
+
+##### Bootstrap 632 for severity #######
+
+n_sev=nrow(test_data_sev)
+boot632_err_outsev=err_oob_outsev=inbag_err_sevout=numeric(250)
+
+for (t in 1:250) {
+  
+  
+  ib_sev = sample(1:n_sev, size=1*n_sev, replace=TRUE)
+  inbag_sample_outsev=test_data_sev[ib_sev,]
+  
+  pred_inbag_outsev <- predict(glm_severity, newdata=inbag_sample_outsev, type="response")
+  inbag_err_sevout[t] =dev_gamma(inbag_sample_outsev$Average_claim,pred_inbag_outsev,inbag_sample_outsev$ClaimNb)
+  
+  #### oob errror prediction
+  
+  oob_outsev= which(!(test_data_sev$IDpol %in% inbag_sample_outsev$IDpol))     
+  oob_sample_outsev= test_data_sev[oob_outsev,]
+  
+  pred_oob_outsev <- predict(glm_severity, newdata=oob_sample_outsev,type="response")
+  err_oob_outsev[t] =dev_gamma(oob_sample_outsev$Average_claim,pred_oob_outsev,oob_sample_outsev$ClaimNb)
+  
+  boot632_err_outsev[t] = 0.368 * err_oob_outsev[t] + 0.632 * inbag_err_sevout[t]
+}
+
+bootstrap_sevout=cbind(boot632_err_outsev,err_oob_outsev,inbag_err_sevout)
+write.csv(bootstrap_sevout,"bootstrap_sevout.csv")
+range_sevout= cbind(quantile(boot632_err_outsev,0.025),quantile(boot632_err_outsev,0.975))
+##### Final comparison in premium terms for GLM: ##########################################################
+test_data_freq
+test_data_final_sev=test_data_freq[,-c(32:33)]
+Predicted.value.GLM.freq
+Predicted.final.GLM.sev<- predict(glm_severity, newdata = test_data_final_sev, type="response")
+premium_predicted_GLM=(Predicted.value.GLM.freq*Predicted.final.GLM.sev*test_data_freq$Exposure)
+orignal_data=test_data_freq$ClaimAmount 
+a=sum(orignal_data)
+b=sum(premium_predicted_GLM)
+(b-a)/a
+write.csv(premium_predicted_GLM,"predicted_Glm")
+write.csv(test_data_freq,"test_data_glm")
+
+####### Bootstrap 632 for bias #####
+n = nrow(test_data_freq)
+B = 250
+pred_inbag=Actual_inbag=bias_inbag=percent.bias_inbag=pred_oob= Actual_oob= bias_oob= percent.bias_oob=boot632_bias= boot632_bias_perc=numeric(B)
+
+ for(b in 1:B){
+ib_bias = sample(1:n, size=1*n, replace=TRUE)
+    
+####### in sample bias calculation
+  inbag_sample_bias=test_data_freq[ib_bias,]
+  
+  #### Freq for bias################################################################
+  pred_freq_inbag <- predict(glm_freq, newdata=inbag_sample_bias,type = "response")
+    ### Sevrity part of the bias
+  Pred_severity_inbag <- predict(glm_severity, newdata=inbag_sample_bias,type = "response") #### Predicted Severity Final
+  ### comparison step
+  orignal_data_inbag= inbag_sample_bias$ClaimAmount
+
+  predicted_premium_inbag= pred_freq_inbag*Pred_severity_inbag*inbag_sample_bias$Exposure
+  
+  pred_inbag[b]=sum(predicted_premium_inbag)
+  Actual_inbag[b]= sum(orignal_data_inbag)
+  
+  bias_inbag[b] = Actual_inbag[b]-pred_inbag[b]
+  percent.bias_inbag[b]=bias_inbag[b]/ Actual_inbag[b]
+  
+  ##### Out of bag bias evaluation ############################################ 
+  
+  oob_sample= which(!(test_data_freq$IDpol %in% inbag_sample_bias$IDpol))
+  oob_sample_bias= test_data_freq[oob_sample,]
+  
+    #### Freq for bias###################################
+  
+  pred_freq_oob <- predict(glm_freq, newdata=oob_sample_bias,type = "response")
+  ### Sevrity part of the bias
+  Pred_severity_oob <- predict(glm_severity, newdata=oob_sample_bias,type = "response") #### Predicted Severity Final
+  ### comparison step
+  orignal_data_oob= oob_sample_bias$ClaimAmount
+  
+  predicted_premium_oob= pred_freq_oob*Pred_severity_oob*oob_sample_bias$Exposure
+  
+  pred_oob[b]=sum(predicted_premium_oob)
+  Actual_oob[b]= sum(orignal_data_oob)
+  
+  bias_oob[b] = Actual_oob[b]-pred_oob[b]
+  percent.bias_oob[b]=bias_oob[b]/ Actual_oob[b]
+  
+  ########### Final 632 errors to be used #####################################
+  
+  boot632_bias[b] = 0.368 * bias_oob[b] + 0.632 * bias_inbag[b]
+
+  boot632_bias_perc[b] = 0.368 * percent.bias_oob[b] + 0.632 * percent.bias_inbag[b]
+  
+  }
+
+bootstrap_bias=cbind(bias_inbag,percent.bias_inbag,bias_oob,percent.bias_oob,boot632_bias, boot632_bias_perc)
+write.csv(bootstrap_bias,"bootstrap_bias.csv")
