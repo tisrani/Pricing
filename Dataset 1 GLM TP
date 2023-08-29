@@ -81,13 +81,11 @@ freMTPL2 = freMTPL2[freMTPL2$ClaimAmount<=10000,]
 dat_freq=freMTPL2  
 dat_freq_nonzero = dat_freq[dat_freq$ClaimAmount!=0,]
 dat_freq_zero = dat_freq[dat_freq$ClaimAmount==0,]
-dim(dat_freq_zero)
 n_dat_freq_zero=nrow(dat_freq_zero)
 set.seed(1001)
 keep_in= sample(1:n_dat_freq_zero, size=.4*n_dat_freq_zero, replace=FALSE)
 dat_freq_zero_keep= dat_freq_zero[keep_in,]  
 dat_freq= rbind(dat_freq_nonzero,dat_freq_zero_keep)  
-dim(dat_freq) 
 #########################################################################################  
 ######## Replacing the FreqMTPL2 label to dat_freq that we commonly use in other code
 ######## Note dat_freq has both frequemcy and severity data 
@@ -121,12 +119,9 @@ set.seed(1001)
 split1= sample(1:n_freq, size=.833*n_freq, replace=FALSE)
 CV_data_freq = dat_freq[split1,]
 test_data_freq = dat_freq[-split1,]
-sum(CV_data_freq$ClaimAmount)/nrow(CV_data_freq)
-sum(test_data_freq$ClaimAmount)/nrow(test_data_freq)
 
 dev_poiss <- function(ytrue, ypred, wcase) -2 * weighted.mean(dpois(ytrue, ypred, log = TRUE) - dpois(ytrue, ytrue, log = TRUE), wcase, na.rm = TRUE)
 dev_gamma <- function(ytrue, ypred, wcase) -2 * weighted.mean(log(ytrue/ypred) - ((ytrue - ypred) / ypred), wcase, na.rm = TRUE)
-dim(dat_freq)
   
 ##### CV for freq#####
   K=5
