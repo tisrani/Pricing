@@ -131,6 +131,7 @@ dev_gamma <- function(ytrue, ypred, wcase) -2 * weighted.mean(log(ytrue/ypred) -
   err.cv.out = matrix("NA",5,5)
   valid_pred = cp.opt = numeric(K)
   err.cv.in.fin= err.cv.out.fin = matrix(NA,5,10)
+p=10
 
 for (t in 1:p) {
     ## re shufling CV data
