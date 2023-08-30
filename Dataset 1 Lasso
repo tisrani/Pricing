@@ -1,1 +1,597 @@
+#install.packages("Metrics")
+library(Metrics)
+library(ISLR)
+library(h2o)
+require(MASS)
+library(CASdatasets)
+require(stats)
+library(data.table)
+library(plyr)
+library(rpart)
+library(rpart.plot)
+library(Hmisc)
+library(glmnet)
+library(dplyr)
+library(locfit)
+library(Metrics)
+library(ISLR)
+library(h2o)
+library(tidyr)
+library(tibble)
+library(insurancerating)
+library(evtree)
+library(mgcv)
+require(MASS)
+library(CASdatasets)
+require(stats)
+library(data.table)
+library(plyr)
+library(dplyr)
+library(purrr)
+library(rpart)
+library(rpart.plot)
+library(Hmisc)
+library(glmnet)
+library(dplyr)
+data(freMTPL2freq)
+data(freMTPL2sev)
+library("wesanderson")
+library(statmod)
+library(scales)
+data(pg17trainpol)
+data(pg17trainclaim)
+data(pg17testyear1)
+data(pg17testyear2)
+data(pg17testyear3)
+data(pg17testyear4)
+data(fredpt17)
+library(ggcorrplot)
+library(ggplot2)
+library(locfit)
+library(Metrics)
+library(ISLR)
+library(h2o)
+require(MASS)
+library(CASdatasets)
+require(stats)
+library(data.table)
+library(plyr)
+library(rpart)
+library(rpart.plot)
+library(Hmisc)
+library(glmnet)
+library(dplyr)
+data(freMTPL2freq)
+data(freMTPL2sev)
+library("wesanderson")
+library(statmod)
+library(scales)
+##################################################
+clrpal = wes_palette("Zissou1", 22, type = "continuous")
+clrpallow = scales::alpha(clrpal,.4)
+bleurouge = clrpal[c(1,22)]
+bleurougepal = clrpallow[c(1,22)]
+colr= clrpal4 = wes_palette("Darjeeling1")[c(1,2,3,5)]
+clrpal6 = wes_palette("Zissou1", 6, type = "continuous")
+### Initial data call 
+#### Aggreagating the two datasets together
+freMTPL2sev_tot = aggregate(freMTPL2sev$ClaimAmount,
+                            by=list(freMTPL2sev$IDpol),
+                            FUN = sum)
+names(freMTPL2sev_tot)=names(freMTPL2sev)
+freMTPL2 = merge(freMTPL2freq,freMTPL2sev_tot,all.x=TRUE)
+freMTPL2$ClaimAmount[is.na(freMTPL2$ClaimAmount)]=0
+
+#### Limiting to only high Exposure policies 
+freMTPL2 = freMTPL2[(freMTPL2$Exposure>.8)&(freMTPL2$Exposure<=1),]
+##### Removing all large claim values 
+freMTPL2 = freMTPL2[freMTPL2$ClaimAmount<=10000,]
+dat_freq=freMTPL2  
+dat_freq_nonzero = dat_freq[dat_freq$ClaimAmount!=0,]
+dat_freq_zero = dat_freq[dat_freq$ClaimAmount==0,]
+n_dat_freq_zero=nrow(dat_freq_zero)
+set.seed(1001)
+keep_in= sample(1:n_dat_freq_zero, size=.4*n_dat_freq_zero, replace=FALSE)
+dat_freq_zero_keep= dat_freq_zero[keep_in,]  
+dat_freq= rbind(dat_freq_nonzero,dat_freq_zero_keep)  
+#########################################################################################  
+######## Replacing the FreqMTPL2 label to dat_freq that we commonly use in other code
+######## Note dat_freq has both frequemcy and severity data 
+freMTPL2_backup = freMTPL2
+####### Making adjustments to data 
+dat_freq$VehGas <- factor(dat_freq$VehGas)    # consider VehGas as categorical
+dat_freq$ClaimNb <- pmin(dat_freq$ClaimNb, 4)   # correct for unreasonable observations (that might be data error)
+dat_freq$Exposure <- pmin(dat_freq$Exposure, 1) # correct for unreasonable observations (that might be data error)
+dat_freq$Area <- as.factor(dat_freq$Area)   ### Area as factor 
+dat_freq$VehPower <- as.factor(pmin(dat_freq$VehPower,9))
+dat_freq$BonusMalus <- as.integer(pmin(dat_freq$BonusMalus, 150))
+dat_freq$Density <- as.numeric(log(dat_freq$Density))
+
+############## Removing Severity data 
+dat_freq_temp= dat_freq[dat_freq$ClaimAmount!=0,]
+ID_Exclude1 = dat_freq_temp$IDpol[which(dat_freq_temp$ClaimAmount<100)]
+ID_Exclude2 = dat_freq_temp$IDpol[which(dat_freq_temp$ClaimAmount %in% c(1204, 1128.12,1172,1128))]
+dat_freq= dat_freq[-which(dat_freq$IDpol %in% c(ID_Exclude1,ID_Exclude2)),]
+##### Shuffling the data
+n_freq = nrow(dat_freq)
+set.seed(100)
+reord_freq = sample(1:n_freq, size=n_freq, replace=FALSE)
+dat_freq = dat_freq[reord_freq, ] 
+dat_freq$ClaimNb=as.numeric(dat_freq$ClaimNb)
+
+features.freq <- setdiff( 1:length(dat_freq) ,  grep("drv_age_lic_avg|id_policy|drv_sex2|vh_make|
+      vh_make|drv_age2|drv_age_lic2|vh_din|vh_sale_begin|vh_sale_end|ClaimAmount|drv_age_avg|Exposure|ClaimNb|
+      drv_age_lic_avg|vh_cyl", names(dat_freq)))
+
+set.seed(1001)
+split1= sample(1:n_freq, size=.833*n_freq, replace=FALSE)
+CV_data_freq = dat_freq[split1,]
+test_data_freq = dat_freq[-split1,]
+
+dev_poiss <- function(ytrue, ypred, wcase) -2 * weighted.mean(dpois(ytrue, ypred, log = TRUE) - dpois(ytrue, ytrue, log = TRUE), wcase, na.rm = TRUE)
+dev_gamma <- function(ytrue, ypred, wcase) -2 * weighted.mean(log(ytrue/ypred) - ((ytrue - ypred) / ypred), wcase, na.rm = TRUE)
+
+
+
+### CV for frequency ################################## 
+n = nrow(CV_data_freq)
+K = 5
+folds = cut(1:n, K, labels=FALSE)
+lam_freq= numeric(K)
+err.internal=err.kfold =matrix(NA,5,10)
+
+p=10
+
+ for (b in 1:p) {
+## re shufling CV data
+  n_CV_freq = nrow(CV_data_freq)
+  reord_CVfreq = sample(1:n_CV_freq, size=n_CV_freq, replace=FALSE)
+  CV_data_freq = CV_data_freq[reord_CVfreq, ]
+  
+
+ for(t in 1:K){
+  ##### Lassso model ########
+   # training sample
+  i = which(folds==t)
+  y.vtrain.freq = as.vector(CV_data_freq$ClaimNb[-i])
+  x.vtrain.expo=as.vector(CV_data_freq[-i,3])
+   x.vtrain.freq = CV_data_freq[-i,features.freq]
+  x.vtrain.freq=model.matrix(x.vtrain.freq$IDpol~.,x.vtrain.freq)[,-1]
+  # Validation  sample
+  y.valid.freq = as.vector(CV_data_freq$ClaimNb[i])
+  x.valid.expo=as.vector(CV_data_freq[i,3])
+    x.valid.freq = CV_data_freq[i,features.freq]
+  x.valid.freq=model.matrix(x.valid.freq$IDpol~.,x.valid.freq)[,-1]
+  
+  #### fitting the freqency model 
+    cv_output <- cv.glmnet(x.vtrain.freq,y.vtrain.freq, 
+                         alpha = 1, family="poisson", offset=log(x.vtrain.expo), standardize=FALSE )
+  
+    best_lam <- cv_output$lambda.min
+    lam_freq[t]=best_lam
+    lasso_best <- glmnet(x.vtrain.freq,y.vtrain.freq, alpha = 1, lambda = best_lam, family="poisson", offset=log(x.vtrain.expo), standardize =FALSE)
+    y.internal <- predict(lasso_best, s = best_lam, newx = x.vtrain.freq, newoffset= log(x.vtrain.expo), type="response")
+  
+    err.internal[t,b] =dev_poiss(y.vtrain.freq,y.internal,x.vtrain.expo )
+    # coeff[,t]=as.vector(coef(lasso_best))
+  
+  y.pred <- predict(lasso_best, s = best_lam, newx = x.valid.freq, newoffset= log(x.valid.expo), type="response")
+  
+    err.kfold[t,b] =dev_poiss(y.valid.freq,y.pred,x.valid.expo)
+
+}
+ }
+
+write.csv(err.internal,"err.internal.csv")
+write.csv(err.kfold,"err.kfold.csv")
+
+######################## CV for frequency end here##################
+# coeff
+CV_freq_result= as.data.frame(cbind(lam_freq,err.internal[,10],err.kfold[,10]))
+# write.csv(CV_freq_result,"CV_freq_result.csv")
+best_lam= CV_freq_result$lam_freq[which.min(CV_freq_result$V3)]  
+##### Frequency model 
+
+# training sample
+y.train.freq = as.vector(CV_data_freq$ClaimNb)
+x.train.expo=as.vector(CV_data_freq[,3])
+x.train.freq = CV_data_freq[,features.freq]
+x.train.freq=model.matrix(x.train.freq$IDpol~.,x.train.freq)[,-1]
+#### fitting the freqency model 
+### Best lambda selection after looking at CV results 
+### fit best model 
+lasso_best.freq <- glmnet(x.train.freq, y.train.freq, alpha = 1, lambda = best_lam, family="poisson", offset=log(x.train.expo), standardize =FALSE)
+
+lasso_best.freq
+####### Variable Importance ###########################
+
+varImp <- function(object, lambda = NULL, ...) {
+  beta <- predict(object, s = lambda, type = "coef")
+  if(is.list(beta)) {
+    out <- do.call("cbind", lapply(beta, function(x) x[,1]))
+    out <- as.data.frame(out, stringsAsFactors = TRUE)
+  } else out <- data.frame(Overall = beta[,1])
+  out <- abs(out[rownames(out) != "(Intercept)",,drop = FALSE])
+  out
+}
+
+Lasso_freq_varimp= varImp(lasso_best.freq,best_lam)
+write.csv(Lasso_freq_varimp,"Lasso_freq_varimp.csv")
+##############################################################################################
+y.internal.freq <- predict(lasso_best.freq, s = best_lam, newx = x.train.freq, newoffset= log(x.train.expo), type="response")
+err.internal.freq =dev_poiss(y.train.freq,y.internal.freq,x.train.expo)
+coeff.lasso.freq=as.matrix(coef(lasso_best.freq))
+write.csv(coeff.lasso.freq,"coeff.lasso.freq.csv")
+
+### Prediction on complete test sample 
+x.test.expo=as.vector(test_data_freq[,3])
+x.test.freq = test_data_freq[,features.freq]
+x.test.freq=model.matrix(x.test.freq$IDpol~.,x.test.freq)[,-1]
+y.test.freq=as.vector(test_data_freq$ClaimNb)
+y.pred.freq <- predict(lasso_best.freq, s = best_lam, newx = x.test.freq, newoffset= log(x.test.expo), type="response")
+
+err.external.freq =dev_poiss(y.test.freq,y.pred.freq,x.test.expo)
+final_freq=cbind(err.internal.freq,err.external.freq)
+# write.csv(final_freq,"final_freq.csv")
+
+##### Bootstrap 632 error ###########################
+n_freq=nrow(test_data_freq)
+inbag_err_freqout=oob_err_freqout=boot632_err_outfreq=numeric(250)
+ for (t in 1:250) {
+  ib = sample(1:n_freq, size=1*n_freq, replace=TRUE)
+  inbag_sample_outfreq=test_data_freq[ib,]
+  
+  # test sample boot 
+  y.inbag.freq_boot= as.vector(inbag_sample_outfreq$ClaimNb)
+  x.inbag.expo_boot=as.vector(inbag_sample_outfreq[,3])
+  x.inbag.freq_boot = inbag_sample_outfreq[,features.freq]
+  x.inbag.freq_boot=model.matrix(x.inbag.freq_boot$IDpol~.,x.inbag.freq_boot)[,-1]
+  
+    pred_inbag_outfreq <- predict(lasso_best.freq, s = best_lam, newx = x.inbag.freq_boot, newoffset= log(x.inbag.expo_boot), type="response")
+  inbag_err_freqout[t] =dev_poiss(inbag_sample_outfreq$ClaimNb,pred_inbag_outfreq,inbag_sample_outfreq$Exposure)
+  
+  #### oob errror prediction
+  oob_outfreq= which(!(test_data_freq$IDpol %in% inbag_sample_outfreq$IDpol))     
+  oob_sample_outfreq= test_data_freq[oob_outfreq,]
+  
+  y.oob.freq_boot= as.vector(oob_sample_outfreq$ClaimNb)
+  x.oob.expo_boot=as.vector(oob_sample_outfreq[,3])
+  x.oob.freq_boot = oob_sample_outfreq[,features.freq]
+  x.oob.freq_boot=model.matrix(x.oob.freq_boot$IDpol~.,x.oob.freq_boot)[,-1]
+  
+  pred_oob_outfreq <- predict(lasso_best.freq, s = best_lam, newx = x.oob.freq_boot, newoffset= log(x.oob.expo_boot), type="response")
+  oob_err_freqout[t] =dev_poiss(oob_sample_outfreq$ClaimNb,pred_oob_outfreq,oob_sample_outfreq$Exposure)
+  
+  boot632_err_outfreq [t] = 0.368 * oob_err_freqout[t] + 0.632 * inbag_err_freqout[t]
+  
+}
+
+bootstrap_freqout=cbind(boot632_err_outfreq,oob_err_freqout,inbag_err_freqout)
+write.csv(bootstrap_freqout,"bootstrap_freqout.csv")
+range_freqout= cbind(quantile(boot632_err_outfreq,0.025),quantile(boot632_err_outfreq,0.975))
+
+
+###### Bootstrapping the external error old method
+# n_freq=nrow(test_data_freq)
+# fin_err_boot=numeric(50)
+# for (t in 1:50) {
+#   ib = sample(1:n_freq, size=1*n_freq, replace=TRUE)
+#   test_data_freq_boot=test_data_freq[ib,]
+#   # test sample boot 
+#   y.test.freq_boot= as.vector(test_data_freq_boot$ClaimNb)
+#   x.test.expo_boot=as.vector(test_data_freq_boot[,3])
+#   x.test.freq_boot = test_data_freq_boot[,-c(2:3)]
+#   x.test.freq_boot=model.matrix(x.test.freq_boot$IDpol~.,x.test.freq_boot)[,-1]
+#   
+#   y.pred.freq_boot <- predict(lasso_best.freq, s = best_lam, newx = x.test.freq_boot, newoffset= log(x.test.expo_boot), type="response")
+#   fin_err_boot[t] =dev_poiss(y.test.freq_boot,y.pred.freq_boot,x.test.expo_boot)
+# 
+# }
+# 
+# fin_err_boot
+# write.csv(fin_err_boot,"fin_err_boot.csv")
+# CV_freq_result$err.kfold
+# box=cbind(fin_err_boot,CV_freq_result$err.kfold)
+# colnames(box)=c("Bootstrap Error", "CV Error")
+# pdf("Frequency boot 1.pdf")
+# boxplot(box,main="LASSO Frequency Model Boxplot For Comparison of Internal and External Errors", ylab="Poisson Deviance")
+# dev.off()
+
+
+######### SEVERIRTY DATA AND MODEL ###############################################################################################
+##### This is the final merged dataset
+dat_severity = dat_freq[dat_freq$ClaimAmount!=0,]
+dat_severity$Average_claim= dat_severity$ClaimAmount/dat_severity$ClaimNb
+write.csv(dat_severity,"dat_severity.csv")
+n_severity = nrow(dat_severity)
+set.seed(1001)
+reord_sev = sample(1:n_severity, size=n_severity, replace=FALSE)
+dat_severity = dat_severity[reord_sev, ] 
+colnames(dat_severity)
+
+features.severity <- setdiff( 1:length(dat_severity) ,  grep("drv_sex2|drv_age_lic_avg|drv_age_avg|
+                    vh_make|vh_make|drv_age2|drv_age_lic2|vh_din|vh_sale_begin|vh_sale_end|ClaimAmount|drv_age_avg|Exposure|
+                          drv_age_lic_avg|id_policy|vh_cyl", names(dat_severity)))
+# save a validation sample for later:
+set.seed(100)
+i.valid_sev = sample(1:n_severity, size=.833*n_severity, replace=FALSE)
+CV_data_sev = dat_severity[i.valid_sev,]
+test_data_sev = dat_severity[-i.valid_sev,]
+str(CV_data_sev)
+
+str(CV_data_sev)
+
+# CV_data_sev$IDpol= as.numeric(CV_data_sev$IDpol)
+# CV_data_sev$ClaimNb=as.numeric(CV_data_sev$ClaimNb)
+# CV_data_sev$Exposure=as.numeric(CV_data_sev$Exposure)
+# CV_data_sev$Average_claim= as.numeric(CV_data_sev$Average_claim)
+# CV_data_sev$BonusMalus=as.numeric(CV_data_sev$BonusMalus)
+# CV_data_sev$Density=as.numeric(CV_data_sev$Density)
+#### CV 10 fold severity ############################################
+n_sev = nrow(CV_data_sev)
+K = 5
+folds = cut(1:n_sev, K, labels=FALSE)
+coeff_sev=matrix(NA,nrow=53,ncol=10)
+lam_sev=lam = numeric(K)
+err.internal_sev=err.kfold_sev=matrix(NA,5,10)
+rm(t)
+p=10
+
+ for (j in 1:p) {
+  ## re shufling CV data
+  n_CV_sev = nrow(CV_data_sev)
+  reord_CVsev = sample(1:n_CV_sev, size=n_CV_sev, replace=FALSE)
+  CV_data_sev = CV_data_sev[reord_CVsev,]
+
+ for(t in 1:K){
+  # training sample
+  i = which(folds==t)
+  vtrain_sev= CV_data_sev[-i,]
+  valid_sev= CV_data_sev[i,]
+    #training sample
+  colnames(vtrain_sev)
+  x.vtrain_sev = vtrain_sev[,features.severity]
+  y.vtrain_sev=vtrain_sev$Average_claim
+  claimN.vtrain_sev=vtrain_sev$ClaimNb
+  x.vtrain_sev=model.matrix(x.vtrain_sev$IDpol~.,x.vtrain_sev)[,-1]
+  
+   # Validation sample
+  x.valid_sev = valid_sev[,features.severity]
+  y.valid_sev=valid_sev$Average_claim
+  claimN.valid_sev=valid_sev$ClaimNb
+  x.valid_sev=model.matrix(x.valid_sev$IDpol~.,x.valid_sev)[,-1]
+  
+  # train model on training data:
+  h2o.init()
+  h2o_train = as.h2o((x.vtrain_sev))
+  h2o_valid = as.h2o((x.valid_sev))
+  y_label = "Average_claim"
+  claims_number= "ClaimNb"
+  x_label = names(h2o_train)
+  x_label= x_label[-which(x_label==y_label)]
+  x_label= x_label[-which(x_label==claims_number)]
+  
+  lasso_sev = h2o.glm(training_frame = h2o_train, x = x_label, y = y_label,nfolds = 10, alpha = 1,
+                      family='gamma',weight=claims_number,link="log", lambda_search = TRUE)
+  
+  best_lam_sev <- lasso_sev@model$lambda_best
+  lam_sev[t]=best_lam_sev
+  #########################################################
+  lasso_best_sev <-h2o.glm(training_frame = h2o_train, x = x_label, y = y_label, alpha = 1,
+                           family='gamma',weight=claims_number,link="log", lambda_search = FALSE, lambda = best_lam_sev)
+  
+  
+  y.internal_sev <- as.vector(h2o.predict(lasso_best_sev,h2o_train))
+  err.internal_sev[t,j] =dev_gamma(y.vtrain_sev,y.internal_sev,claimN.vtrain_sev)
+  y.external_sev <- as.vector(h2o.predict(lasso_best_sev,h2o_valid))
+  err.kfold_sev[t,j] =dev_gamma(y.valid_sev,y.external_sev,claimN.valid_sev)
+}
+}
+
+#############################  CV  for severity over#####################
+write.csv(err.internal_sev,"err.internal_sev.csv")
+write.csv(err.kfold_sev,"err.kfold_sev.csv")
+
+# lam_best_sev=out_sev$lam_sev[which.min(out_sev$err.kfold_sev)]
+lam_best_sev=mean(lam_sev)
+
+###### Fitting the severity model
+#training sample
+str(test_data_sev)
+# test_data_sev$IDpol=as.numeric(test_data_sev$IDpol)
+# test_data_sev$ClaimNb=as.numeric(test_data_sev$ClaimNb)
+# test_data_sev$Exposure=as.numeric(test_data_sev$Exposure)
+# test_data_sev$Average_claim=as.numeric(test_data_sev$Average_claim)
+# test_data_sev$BonusMalus=as.numeric(test_data_sev$BonusMalus)
+# test_data_sev$Density=as.numeric(test_data_sev$Density)
+
+x.train_sev = CV_data_sev[,features.severity]
+y.train_sev=x.train_sev$Average_claim
+x.train_sev=model.matrix(x.train_sev$IDpol~.,x.train_sev)[,-1]
+
+### test data type casting 
+# test sample
+x.test_sev = test_data_sev[,features.severity]
+y.test_sev=x.test_sev$Average_claim
+x.test_sev=model.matrix(x.test_sev$IDpol~.,x.test_sev)[,-1]
+
+
+# train model on training data:
+h2o.init()
+h2o_train = as.h2o((x.train_sev))
+h2o_test = as.h2o((x.test_sev))
+y_label = "Average_claim"
+claims_number= "ClaimNb"
+x_label = names(h2o_train)
+x_label= x_label[-which(x_label==y_label)]
+x_label= x_label[-which(x_label==claims_number)]
+
+lasso_sev_final = h2o.glm(training_frame = h2o_train, x = x_label, y = y_label, alpha = 1,
+                          family='gamma',weight=claims_number,link="log", lambda_search = FALSE, lambda = lam_best_sev)
+
+
+Lasso_severity_varimp= h2o.varimp(lasso_sev_final)
+write.csv(Lasso_severity_varimp,"Lasso_severity_varimp.csv")
+summary(lasso_sev_final)
+
+y.in_final_sev <- as.vector(h2o.predict(lasso_sev_final,h2o_train))
+error.in_sev= dev_gamma(y.train_sev,y.in_final_sev,CV_data_sev$ClaimNb)
+coeff_sev_final=as.vector(lasso_best_sev@model$coefficients_table[,2])
+
+y.out_sev <- as.vector(h2o.predict(lasso_sev_final,h2o_test))
+error.out_sev=dev_gamma(y.test_sev,y.out_sev,test_data_sev$ClaimNb)
+
+final_severity=cbind(error.in_sev,error.out_sev)
+write.csv(final_severity,"final_severity.csv")
+
+##### Bootstrap 632 error for severity ########################################################
+n_sev=nrow(test_data_sev)
+boot632_err_outsev=oob_err_sevout=inbag_err_sevout=numeric(250)
+
+ for (t in 1:250) {
+  ib_sev = sample(1:n_sev, size=1*n_sev, replace=TRUE)
+  inbag_sample_outsev=test_data_sev[ib_sev,]
+  
+  # test sample boot 
+  y.inbag.sev_boot= as.vector(inbag_sample_outsev$ClaimNb)
+  x.inbag.sev_boot = inbag_sample_outsev[,features.severity]
+  x.inbag.sev_boot=model.matrix(x.inbag.sev_boot$IDpol~.,x.inbag.sev_boot)[,-1]
+  
+  h2o.init()
+  h2o_inbag_sev_boot = as.h2o((x.inbag.sev_boot))
+  pred_inbag_outsev <- as.vector(h2o.predict(lasso_sev_final,h2o_inbag_sev_boot))
+  
+  inbag_err_sevout[t] =dev_gamma(inbag_sample_outsev$Average_claim,pred_inbag_outsev,inbag_sample_outsev$ClaimNb)
+  
+  #### oob errror prediction
+  oob_outsev= which(!(test_data_sev$IDpol %in% inbag_sample_outsev$IDpol))     
+  oob_sample_outsev= test_data_sev[oob_outsev,]
+  
+  y.oob.sev_boot= as.vector(oob_sample_outsev$ClaimNb)
+  x.oob.sev_boot = oob_sample_outsev[,features.severity]
+  x.oob.sev_boot=model.matrix(x.oob.sev_boot$IDpol~.,x.oob.sev_boot)[,-1]
+  
+    h2o.init()
+    h2o_oob_sev_boot = as.h2o((x.oob.sev_boot))
+    pred_oob_outsev <- as.vector(h2o.predict(lasso_sev_final,h2o_oob_sev_boot))
+    oob_err_sevout[t] =dev_gamma(oob_sample_outsev$Average_claim,pred_oob_outsev,oob_sample_outsev$ClaimNb)
+  
+  boot632_err_outsev [t] = 0.368 * oob_err_sevout[t] + 0.632 * inbag_err_sevout[t]
+  
+}
+
+bootstrap_sevout=cbind(boot632_err_outsev,oob_err_sevout,inbag_err_sevout)
+write.csv(bootstrap_sevout,"bootstrap_sevout.csv")
+range_freqout= cbind(quantile(boot632_err_outsev,0.025),quantile(boot632_err_outsev,0.975))
+
+####### Taking the orignal Frequency test data to get the final prediction of premium#################
+####best severity model is lasso_sev_final  
+test_data_freq
+str(test_data_freq)
+#y.pred.freq <- predict(lasso_best.freq, s = best_lam, newx = x.test.freq, newoffset= log(x.test.expo), type="response")
+y.pred.freq   ### Predicted claims
+# ### correcting the data types
+# test_data_freq$IDpol=as.numeric(test_data_freq$IDpol)
+# test_data_freq$ClaimNb=as.numeric(test_data_freq$ClaimNb)
+# test_data_freq$Exposure=as.numeric(test_data_freq$Exposure)
+# test_data_freq$BonusMalus=as.numeric(test_data_freq$BonusMalus)
+# test_data_freq$Density=as.numeric(test_data_freq$Density)
+###############################################################
+final_sev_factors= test_data_freq[,features.freq]
+final_sev_factors=model.matrix(final_sev_factors$IDpol~.,final_sev_factors)[,-1]
+
+h2o_final = as.h2o((final_sev_factors))
+y.final_sev <- as.vector(h2o.predict(lasso_sev_final,h2o_final))
+a= sum(test_data_freq$ClaimAmount)
+predicted_premium= y.pred.freq*y.final_sev
+b= sum(predicted_premium)
+(a-b)/a
+#########################
+write.csv(predicted_premium,"prediceted_lasso")
+write.csv(test_data_freq,"test_data")
+###################bias 632 errors ######################################################
+
+
+#### bias calc###################
+n = nrow(test_data_freq)
+B = 250
+pred.bias_inbag=Actual.bias_inbag=bias_inbag=percent.bias_inbag=numeric(B)
+pred.bias_oob=Actual.bias_oob=bias_oob=percent.bias_oob=boot632_bias=boot632_bias_perc=numeric(B)
+
+ for(b in 1:B){
+#### inbag ######  
+  ib_bias = sample(1:n, size=1*n, replace=TRUE)
+    inbag_sample_bias= test_data_freq[ib_bias,]
+  
+  x.inbag.freq.bias = inbag_sample_bias[,features.freq]
+  x.inbag.freq.bias=model.matrix(x.inbag.freq.bias$IDpol~.,x.inbag.freq.bias)[,-1]
+  
+  x.inbag.expo.bias=inbag_sample_bias$Exposure
+    #### Freq for bias 
+  pred_inbag_biasfreq <- predict(lasso_best.freq,s = best_lam, newx = x.inbag.freq.bias, newoffset= log(x.inbag.expo.bias), type="response")
+  
+  ### Sevrity part of the bias
+  
+  x_inbag_sev_bias= inbag_sample_bias[,features.freq]
+  x_inbag_sev_bias=model.matrix(x_inbag_sev_bias$IDpol~.,x_inbag_sev_bias)[,-1]
+  h2o_inbag_sev_bias = as.h2o(as.matrix(x_inbag_sev_bias))
+  Pred_sev_inbag_bias <-as.vector(h2o.predict(lasso_sev_final,h2o_inbag_sev_bias)) 
+  
+  ### comparison step
+  orignal_data_inbag_bias= inbag_sample_bias$ClaimAmount
+  pred_premium_bias_inbag= pred_inbag_biasfreq*Pred_sev_inbag_bias*inbag_sample_bias$Exposure
+  
+  pred.bias_inbag[b]=sum(pred_premium_bias_inbag)
+  Actual.bias_inbag[b]= sum(orignal_data_inbag_bias)
+  bias_inbag[b] = Actual.bias_inbag[b]-pred.bias_inbag[b]
+  percent.bias_inbag[b]=bias_inbag[b]/ Actual.bias_inbag[b]
+  
+##### oob##########
+  oob_sample= which(!(test_data_freq$IDpol %in% inbag_sample_bias$IDpol))
+  oob_sample_bias= test_data_freq[oob_sample,]
+  
+  
+  x.oob.freq.bias = oob_sample_bias[,features.freq]
+  x.oob.freq.bias=model.matrix(x.oob.freq.bias$IDpol~.,x.oob.freq.bias)[,-1]
+  
+  x.oob.expo.bias=oob_sample_bias$Exposure
+  #### Freq for bias 
+  pred_oob_biasfreq <- predict(lasso_best.freq,s = best_lam, newx = x.oob.freq.bias, newoffset= log(x.oob.expo.bias), type="response")
+  
+  ### Sevrity part of the bias
+  
+  x_oob_sev_bias= oob_sample_bias[,features.freq]
+  x_oob_sev_bias=model.matrix(x_oob_sev_bias$IDpol~.,x_oob_sev_bias)[,-1]
+  h2o_oob_sev_bias = as.h2o(as.matrix(x_oob_sev_bias))
+  Pred_sev_oob_bias <-as.vector(h2o.predict(lasso_sev_final,h2o_oob_sev_bias)) 
+  
+  ### comparison step
+  orignal_data_oob_bias= oob_sample_bias$ClaimAmount
+    
+  pred_premium_bias_oob= pred_oob_biasfreq*Pred_sev_oob_bias*oob_sample_bias$Exposure
+  
+  pred.bias_oob[b]=sum(pred_premium_bias_oob)
+  Actual.bias_oob[b]= sum(orignal_data_oob_bias)
+  bias_oob[b] = Actual.bias_oob[b]-pred.bias_oob[b]
+  percent.bias_oob[b]=bias_oob[b]/ Actual.bias_oob[b]
+  ########### Final 632 errors to be used #####################################
+  
+  boot632_bias[b] = 0.368 * bias_oob[b] + 0.632 * bias_inbag[b]
+  
+  boot632_bias_perc[b] = 0.368 * percent.bias_oob[b] + 0.632 * percent.bias_inbag[b]
+  
+    }
+
+bootstrap_bias=cbind(bias_inbag,percent.bias_inbag,bias_oob,percent.bias_oob,boot632_bias, boot632_bias_perc)
+write.csv(bootstrap_bias,"bootstrap_bias.csv")
+
+boxplot(boot632_bias_perc)
+
+# prem_boot=cbind(pred.bias,Actual.bias,bias,percent.bias)
+# write.csv(prem_boot,"prem_boot.csv")
+# prem_boot=as.data.frame(prem_boot)
+# boxplot(prem_boot$percent.bias)
+ 
+
+
 
