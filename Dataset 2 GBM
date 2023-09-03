@@ -1,1 +1,480 @@
+   #install.packages("gbm")
+  # install.packages("pdp")
+  # install.packages("vip")
+  #install.packages("lime")
+  # install.packages("ggplot2")
+  # install.packages("tibble")
+  # install.packages("scales")
+  # install.packages("rlang", type = "source")
+  # install.packages("glue")
+  library(Metrics)
+  library(ISLR)
+  library(h2o)
+  require(MASS)
+  library(CASdatasets)
+  require(stats)
+  library(data.table)
+  library(plyr)
+  library(rpart)
+  library(rpart.plot)
+  library(Hmisc)
+  library(glmnet)
+  library(dplyr)
+  library(gbm)
+  library(pdp)           # for partial dependence plots
+  library(vip)           # for variable importance plots
+  library(ggplot2)
+  library(lime)         # model visualization
+  library(tibble)
+  library(dplyr)
+  library(h2o)
+  # remotes::update_packages("rlang")
+  # remotes::update_packages("tidyverse")
+  #### Library for Severity model 
+  # install.packages(devtools)
+  # devtools::install_github('henckr/distRforest')
+  library(distRforest)
+  data(pg17trainpol)
+  data(pg17trainclaim)
+  data(pg17testyear1)
+  data(pg17testyear2)
+  data(pg17testyear3)
+  data(pg17testyear4)
+  data(fredpt17)
+  library(ggcorrplot)
+  library(ggplot2)
+#########################
+  testyear1=pg17testyear1
+  testyear2=pg17testyear2
+  testyear3=pg17testyear3
+  testyear4=pg17testyear4
+  # a1=pg17trainpol
+  # a2=pg17trainclaim
+  ### Data cleaning done in excel, removed -ve claims amount and aggregated data and brought back the cleaned data below: 
+  dat= read.csv("C:/Users/tisra/Desktop/Phd Code/11. APTP by factor/New Data set Pricing Game/R Input/Train_data_upload.csv")
+  ##### Adding Exclusions to the severity data #####
+  dat_adj=dat[which(dat$ClaimAmount==0 |  dat$ClaimAmount>= 84.42),]
+  dat_adj= dat_adj[which(dat_adj$ClaimAmount<=16770.62),]
+  dat_adj= dat_adj[which(!dat_adj$ClaimAmount %in% c(56.19,60.29,75.88,103.59,106.14,110.98,130.11,618,1010.41,1236,1240.89,1442.87,2323.95,2453.28,2683.76
+  )),]
+  dat_adj= dat_adj[which(!dat_adj$id_policy %in% c("A00000765-V02")),]  ## Policy removed as did not have Vehicle Age 
+  dat_adj$ClaimNb = ifelse(dat_adj$ClaimNb > 3, 3, dat_adj$ClaimNb)
+  
+  #### Character data only 
+  char_cols <- sapply(dat_adj, is.character)
+  dat_adj_char= dat_adj[,char_cols]
+  dat_adj_char[] <- lapply(dat_adj_char, as.factor)
+  dat_adj_char=dat_adj_char[,5:16]
+  dat_adj_char=dat_adj_char[,c(1:4,6:10,12)]
+  #### Numeric data only 
+  num_cols <- sapply(dat_adj, is.numeric)
+  dat_adj_num <- dat_adj[, num_cols]
+  dat_adj_boxplot= cbind(dat_adj_char,dat_adj_num)
+  dat_adj_boxplot$exposure =1
+  dat_adj_boxplot$IDpol= dat_adj$id_policy
+  ##### Shuffling the data
+  dat_freq=dat_adj_boxplot
+  n_freq = nrow(dat_freq)
+  set.seed(100)
+  reord_freq = sample(1:n_freq, size=n_freq, replace=FALSE)
+  dat_freq = dat_freq[reord_freq, ] 
+  
+  # save a validation sample for later:
+  set.seed(100)
+  split1= sample(1:n_freq, size=.833*n_freq, replace=FALSE)
+  CV_data_freq = dat_freq[split1,]
+  test_data_freq = dat_freq[-split1,]
+  dev_poiss <- function(ytrue, ypred, wcase) -2 * weighted.mean(dpois(ytrue, ypred, log = TRUE) - dpois(ytrue, ytrue, log = TRUE), wcase, na.rm = TRUE)
+  dev_gamma <- function(ytrue, ypred, wcase) -2 * weighted.mean(log(ytrue/ypred) - ((ytrue - ypred) / ypred), wcase, na.rm = TRUE)  
+
+      ##### GBM Model fitting
+    hyper_grid <- expand.grid(
+    n.trees = c(2000),
+    interaction.depth = c(1,2,3)
+  )
+  ############## CV for frequency ############################
+  K=5
+  n = nrow(CV_data_freq)
+  folds = cut(1:n, K, labels=FALSE)
+  err.vinternal.freq=err.vout.freq= numeric(3)
+  err.cv.in=err.cv.out=matrix("NA",3,5)
+  cp.opt=numeric(5)
+  err.cv.in.fin= err.cv.out.fin=matrix(NA,5,10)
+  p=10
+  
+ for (t in 1:p) {
+    ## re shuffling CV data
+      n_CV_freq = nrow(CV_data_freq)
+    reord_CVfreq = sample(1:n_CV_freq, size=n_CV_freq, replace=FALSE)
+    CV_data_freq = CV_data_freq[reord_CVfreq, ]
+    
+ for (a in 1:K) {
+    i = which(folds==a)
+    vtrain.data.freq=CV_data_freq[-i,]
+    valid.data.freq=CV_data_freq[i,]
+    Ntr = nrow(vtrain.data.freq)
+    Ktr = 5
+    err.out.freq = numeric(3)
+    int.output.tr=pred.output.tr=matrix(NA,5,3)
+
+  for (c in 1:3) {# tuning tree model (equivalent to cv.glmnet())
+
+      tr.folds = cut(1:Ntr, Ktr, labels=FALSE)
+      internal.errors.tr= pdev.errors.tr = numeric(Ktr)
+  for(k in 1:Ktr){
+
+        ik = which(tr.folds==k)
+        vtrain.data.freq.tr = vtrain.data.freq[-ik,]
+        valid.data.freq.tr = vtrain.data.freq[ik,]
+
+        gbm_freq_valid.tr <- gbm( formula = ClaimNb ~offset(log(vtrain.data.freq.tr$Exposure))+ Area + VehPower + VehAge + DrivAge + BonusMalus + VehBrand + VehGas + Density + Region, distribution = "poisson",
+          data = vtrain.data.freq.tr, shrinkage = 0.01 ,n.trees = hyper_grid$n.trees[c], interaction.depth = hyper_grid$interaction.depth[c],n.cores = NULL, verbose = FALSE)
+
+
+        train_pred<-exp(predict(gbm_freq_valid.tr, newdata= vtrain.data.freq.tr))*vtrain.data.freq.tr$Exposure
+        internal.errors.tr[k] = dev_poiss(vtrain.data.freq.tr$ClaimNb,train_pred,vtrain.data.freq.tr$Exposure)
+
+
+      valid_pred <- exp(predict(gbm_freq_valid.tr, newdata=valid.data.freq.tr))*valid.data.freq.tr$Exposure
+      pdev.errors.tr[k] = dev_poiss(valid.data.freq.tr$ClaimNb,valid_pred,valid.data.freq.tr$Exposure)
+
+
+  }
+      ### Writing out the internal loop results
+
+      int.output.tr[,c]=internal.errors.tr
+      pred.output.tr[,c]=pdev.errors.tr
+
+    err.out.freq[c] = mean(pdev.errors.tr) # mean CV error
+  }
+
+    write.csv(int.output.tr,paste0(a,"int.output.tr.csv"))
+    write.csv(pred.output.tr,paste0(a,"pred.output.tr.csv"))
+
+  err.cv.out[,a]=err.out.freq
+  cp.opt[a] = which.min(err.out.freq)
+
+    ## Training the CV model 
+  
+  gbm_freq_cp_opt <- gbm(
+    formula = ClaimNb ~ offset(log(vtrain.data.freq$Exposure))+factor(pol_pay_freq)+factor(pol_payd)+factor(pol_usage)+
+      factor(drv_drv2)+factor(drv_sex1)+factor(vh_fuel)+factor(vh_type)+(pol_duration)+(pol_sit_duration)+(drv_age1)+
+      (drv_age_lic1)+(vh_age)+(vh_speed)+(vh_value)+(vh_weight) +(Density)+ (pol_bonus)+ factor(pol_coverage) , distribution = "poisson",
+    data = vtrain.data.freq, shrinkage = 0.01 ,n.trees =hyper_grid$n.trees[cp.opt[a]] , interaction.depth = hyper_grid$interaction.depth[cp.opt[a]],n.cores = NULL, verbose = FALSE)
+
+  valid_pred_fin <- exp(predict(gbm_freq_cp_opt, newdata=valid.data.freq))*valid.data.freq$Exposure
+  err.cv.out.fin[a,t]=dev_poiss(valid.data.freq$ClaimNb,valid_pred_fin,valid.data.freq$Exposure)
+  
+  internal_pred_fin <- exp(predict(gbm_freq_cp_opt, newdata=vtrain.data.freq))*vtrain.data.freq$Exposure
+  err.cv.in.fin[a,t]=dev_poiss(vtrain.data.freq$ClaimNb,internal_pred_fin,vtrain.data.freq$Exposure)
+  
+  }
+}
+################# CV for frequency ends #####################
+  write.csv(err.cv.out.fin,"err.cv.out.fin.csv")
+  write.csv(err.cv.in.fin,"err.cv.in.fin.csv")
+
+# (1) Prediction performance from CV:
+  mean(err.cv.out.fin)
+  
+  # (2) Independent test error evaluation:
+  final.cp.opt.test=apply(err.cv.out,2,which.min)
+  final.cp.opt=round(mean(final.cp.opt.test))
+
+    gbm_freq <- gbm(
+    formula = ClaimNb ~ offset(log(CV_data_freq$Exposure))+factor(pol_pay_freq)+factor(pol_payd)+factor(pol_usage)+
+      factor(drv_drv2)+factor(drv_sex1)+factor(vh_fuel)+factor(vh_type)+(pol_duration)+(pol_sit_duration)+(drv_age1)+
+      (drv_age_lic1)+(vh_age)+(vh_speed)+(vh_value)+(vh_weight) +(Density)+ (pol_bonus)+ factor(pol_coverage), distribution = "poisson",
+    data = CV_data_freq, shrinkage = 0.01 ,n.trees =hyper_grid$n.trees[final.cp.opt] , interaction.depth = hyper_grid$interaction.depth[final.cp.opt],n.cores = NULL, verbose = FALSE)
+
+  importance_freq=summary(gbm_freq)
+  write.csv(importance_freq,"importance_freq.csv")
+  
+  pred_internal_freq= exp(predict(gbm_freq, newdata =  CV_data_freq,n.trees = 2000))*CV_data_freq$Exposure
+  pred_external_freq=exp(predict(gbm_freq,test_data_freq,n.trees = 2000))*test_data_freq$Exposure
+  write.csv(pred_external_freq,"pred_external_freq.csv")
+  write.csv(test_data_freq,"test_data_freq.csv")
+    
+  err.internal.fin.freq=dev_poiss(CV_data_freq$ClaimNb,pred_internal_freq,CV_data_freq$Exposure)
+  err.out.fin.freq=dev_poiss(test_data_freq$ClaimNb,pred_external_freq,test_data_freq$Exposure)  
+  
+  final_err_freq=cbind(err.internal.fin.freq,err.out.fin.freq)
+  write.csv(final_err_freq,"final_err_freq.csv")
+  
+  ######## Boot 632 for external error ######
+  ## Boot 632 of the external error
+  
+  n_freq=nrow(test_data_freq)
+  boot632_err_outfreq=err_oob_outfreq=inbag_err_freqout=numeric(250)
+  
+  for (t in 1:250) {
+    ib = sample(1:n_freq, size=1*n_freq, replace=TRUE)
+    inbag_sample_outfreq=test_data_freq[ib,]
+    
+    pred_inbag_outfreq <- exp(predict(gbm_freq, newdata=inbag_sample_outfreq))*inbag_sample_outfreq$Exposure
+    inbag_err_freqout[t] =dev_poiss(inbag_sample_outfreq$ClaimNb,pred_inbag_outfreq,inbag_sample_outfreq$Exposure)
+    
+    #### oob error prediction
+    
+    oob_outfreq= which(!(test_data_freq$IDpol %in% inbag_sample_outfreq$IDpol))     
+    oob_sample_outfreq= test_data_freq[oob_outfreq,]
+    
+    pred_oob_outfreq <- exp(predict(gbm_freq, newdata=oob_sample_outfreq))*oob_sample_outfreq$Exposure
+    err_oob_outfreq[t] =dev_poiss(oob_sample_outfreq$ClaimNb,pred_oob_outfreq,oob_sample_outfreq$Exposure)
+    
+    boot632_err_outfreq [t] = 0.368 * err_oob_outfreq[t] + 0.632 * inbag_err_freqout[t]
+    
+  }
+  
+  bootstrap_freqout=cbind(boot632_err_outfreq,err_oob_outfreq,inbag_err_freqout)
+  write.csv(bootstrap_freqout,"bootstrap_freqout.csv")
+  range_freqout= cbind(quantile(boot632_err_outfreq,0.025),quantile(boot632_err_outfreq,0.975))
+  
+######################################################################################
+
+###### Severity Model
+
+#### data processing: 
+dat_severity=dat_freq[dat_freq$ClaimAmount!=0,]
+n_severity = nrow(dat_severity)
+set.seed(1001)
+reord_sev = sample(1:n_severity, size=n_severity, replace=FALSE)
+dat_severity = dat_severity[reord_sev, ] 
+dat_severity$Average_claim=dat_severity$ClaimAmount/dat_severity$ClaimNb
+# save a validation sample for later:
+set.seed(100)
+i.valid_sev = sample(1:n_severity, size=.833*n_severity, replace=FALSE)
+
+CV_data_sev = dat_severity[i.valid_sev,]
+test_data_sev = dat_severity[-i.valid_sev,]
+
+predictors <- c("pol_pay_freq","drv_drv2","drv_age_lic1","pol_payd","drv_sex1","vh_age","Density","pol_bonus",
+                "pol_coverage","pol_usage","vh_fuel","vh_type","vh_speed","pol_duration","vh_value","pol_sit_duration",
+                "vh_weight","drv_age1")
+response <- "Average_claim"
+claimNbr= "ClaimNb"
+
+CV_data_sev=as.data.frame(CV_data_sev)
+
+# CV_data_sev$IDpol= as.numeric(CV_data_sev$IDpol)
+# CV_data_sev$ClaimNb=as.numeric(CV_data_sev$ClaimNb)
+# CV_data_sev$Exposure=as.numeric(CV_data_sev$Exposure)
+# CV_data_sev$Sum_amount=as.numeric(CV_data_sev$Sum_amount)
+# CV_data_sev$Average_claim= as.numeric(CV_data_sev$Average_claim)
+
+############## CV for Severity
+K=5
+n_sev = nrow(CV_data_sev)
+folds_sev = cut(1:n_sev, K, labels=FALSE)
+err.out.sev=err.vinternal.sev=err.vout.sev= numeric(3)
+err.cvin.sev=err.cvout.sev=matrix("NA",3,5)
+cp.opt.sev=numeric(5)
+err.cvin.fin.sev=err.cvout.fin.sev=matrix(NA,5,10)
+p=10
+
+ for (n in 1:p) {
+
+  ## re shuffling CV data
+  n_CV_sev = nrow(CV_data_sev)
+  reord_CVsev = sample(1:n_CV_sev, size=n_CV_sev, replace=FALSE)
+  CV_data_sev = CV_data_sev[reord_CVsev,]
+
+ for (a in 1:K) {
+  i = which(folds_sev==a)
+  vtrain.data.sev=CV_data_sev[-i,]
+  valid.data.sev=CV_data_sev[i,]
+  Ntr = nrow(vtrain.data.sev)
+  Ktr = 5
+for (c in 1:3) {
+     tr.folds = cut(1:Ntr, Ktr, labels=FALSE)
+    pdev.errors.tr = numeric(Ktr)
+for(k in 1:Ktr){
+      ik = which(tr.folds==k)
+      vtrain.data.sev.tr = vtrain.data.sev[-ik,]
+      valid.data.sev.tr = vtrain.data.sev[ik,]
+      h2o.init(min_mem_size = "20G")    ## specify the memory size for the H2O cloud
+      h2o_vtrain.data.sev.tr=as.h2o(vtrain.data.sev.tr)
+      h2o_valid.data.sev.tr =as.h2o(valid.data.sev.tr)
+
+      gbm_CV_sev.tr <- h2o.gbm(x= predictors,y=response, weights_column = claimNbr,learn_rate=0.001,
+                               training_frame = h2o_vtrain.data.sev.tr, ntrees =hyper_grid$n.trees[c],max_depth =hyper_grid$interaction.depth[c], distribution = "gamma",min_rows=10 )
+
+      valid_pred <- as.vector(predict(gbm_CV_sev.tr, newdata=h2o_valid.data.sev.tr))*valid.data.sev.tr$ClaimNb
+
+      pdev.errors.tr[k] = dev_gamma(valid.data.sev.tr$Average_claim,valid_pred, valid.data.sev.tr$ClaimNb)
+    }
+    err.out.sev[c] = mean(pdev.errors.tr) # mean CV error
+  }
+err.cvout.sev[,a]=err.out.sev
+cp.opt.sev[a] =which.min(err.out.sev)
+
+  h2o.init(max_mem_size = "20G")    ## specify the memory size for the H2O cloud
+  h2o_vtrain.data.sev=as.h2o(vtrain.data.sev)
+  h2o_valid.data.sev =as.h2o(valid.data.sev)
+
+    gbm_cp_out_sev <-h2o.gbm(x= predictors,y=response, weights_column = claimNbr,learn_rate=0.001, 
+                             training_frame = h2o_vtrain.data.sev, ntrees =hyper_grid$n.trees[cp.opt.sev[a]],max_depth =hyper_grid$interaction.depth[cp.opt.sev[a]], distribution = "gamma",min_rows=10 )
+    
+
+  valid_pred_fin.sev <- as.vector(predict(gbm_cp_out_sev, newdata=h2o_valid.data.sev))
+  
+  err.cvout.fin.sev[a,n]=dev_gamma(valid.data.sev$Average_claim,valid_pred_fin.sev,valid.data.sev$ClaimNb)
+  
+  internal_pred_fin.sev <- as.vector(predict(gbm_cp_out_sev, newdata=h2o_vtrain.data.sev))
+  
+  err.cvin.fin.sev[a,n]=dev_gamma(vtrain.data.sev$Average_claim,internal_pred_fin.sev, vtrain.data.sev$ClaimNb)
+  
+}
+}
+
+write.csv(err.cvout.sev,"Tunning Severity Error.csv")
+write.csv(err.cvout.fin.sev,"err.cvout.fin.sev.csv")
+write.csv(err.cvin.fin.sev,"err.cvin.fin.sev.csv")
+
+################## End of CV for Severity
+# (2) Independent test error evaluation:
+  final.cp.opt.test.sev=apply(err.cvout.sev,2,which.min)
+  final.cp.opt.sev=round(mean(final.cp.opt.test.sev))
+##########################  
+  ### test data conversion
+  test_data_sev=as.data.frame(test_data_sev)
+  # test_data_sev$IDpol=as.numeric(test_data_sev$IDpol)
+  # test_data_sev$ClaimNb=as.numeric(test_data_sev$ClaimNb)
+  # test_data_sev$Exposure=as.numeric(test_data_sev$Exposure)
+  # test_data_sev$Sum_amount=as.numeric(test_data_sev$Sum_amount)
+  # test_data_sev$Average_claim=as.numeric(test_data_sev$Average_claim)
+
+  h2o_CV_data_sev=as.h2o(CV_data_sev)
+  h2o_test_data_sev=as.h2o(test_data_sev)
+
+
+  gbm.severity <- h2o.gbm(x= predictors,y=response, weights_column = claimNbr,learn_rate=0.001, 
+           training_frame = h2o_CV_data_sev, ntrees =hyper_grid$n.trees[final.cp.opt.sev],max_depth =hyper_grid$interaction.depth[final.cp.opt.sev], distribution = "gamma",min_rows=10)
+           
+
+##### Looking at our model
+importance_severity=summary(gbm.severity)
+write.csv(importance_severity,"importance_severity.csv")  
+
+  pred_internal_sev= as.vector(predict(gbm.severity, newdata= h2o_CV_data_sev))
+  pred_external_sev=as.vector(predict(gbm.severity, newdata= h2o_test_data_sev))
+  err.fin.internal.sev=dev_gamma(CV_data_sev$Average_claim,pred_internal_sev,CV_data_sev$ClaimNb)
+  err.fin.out.sev=dev_gamma(test_data_sev$Average_claim,pred_external_sev, test_data_sev$ClaimNb)
+  
+
+  ##### Bootstrap 632 for severity #######
+  
+  n_sev=nrow(test_data_sev)
+  boot632_err_outsev=err_oob_outsev=inbag_err_sevout=numeric(250)
+  
+  for (t in 1:250) {
+    ib_sev = sample(1:n_sev, size=1*n_sev, replace=TRUE)
+    inbag_sample_outsev=test_data_sev[ib_sev,]
+    h2o_inbag_sample_outsev=as.h2o(inbag_sample_outsev)
+    
+    pred_inbag_outsev <-as.vector(predict(gbm.severity, newdata=h2o_inbag_sample_outsev))
+    inbag_err_sevout[t] =dev_gamma(inbag_sample_outsev$Average_claim,pred_inbag_outsev,inbag_sample_outsev$ClaimNb)
+    
+    #### oob error prediction
+    
+    oob_outsev= which(!(test_data_sev$IDpol %in% inbag_sample_outsev$IDpol))     
+    oob_sample_outsev= test_data_sev[oob_outsev,]
+    h2o_oob_sample_outsev=as.h2o(oob_sample_outsev)
+    
+    pred_oob_outsev <- as.vector(predict(gbm.severity, newdata=h2o_oob_sample_outsev))
+    err_oob_outsev[t] =dev_gamma(oob_sample_outsev$Average_claim,pred_oob_outsev,oob_sample_outsev$ClaimNb)
+    
+    boot632_err_outsev[t] = 0.368 * err_oob_outsev[t] + 0.632 * inbag_err_sevout[t]
+  }
+  
+  bootstrap_sevout=cbind(boot632_err_outsev,err_oob_outsev,inbag_err_sevout)
+  write.csv(bootstrap_sevout,"bootstrap_sevout.csv")
+  range_sevout= cbind(quantile(boot632_err_outsev,0.025),quantile(boot632_err_outsev,0.975)) 
+
+##### Complete premium values to check how the model performs overall
+####### Taking the original Frequency test data to get the final prediction of premium#################
+
+h2o_test_data_freq= as.h2o(test_data_freq)
+pred_external_freq   ### Predicted claims frequecny 
+Pred_severity <- as.vector(predict(gbm.severity, newdata=h2o_test_data_freq)) #### Predicted Severity Final 
+orignal_data= test_data_freq$ClaimAmount
+
+a=sum(orignal_data)
+predicted_premium= pred_external_freq*Pred_severity*test_data_freq$Exposure
+b=sum(predicted_premium)
+error_prem= (a-b)/a 
+
+write.csv(predicted_premium,"predicted_prem_gbm")
+write.csv(test_data_freq, "test_data_GBM")
+
+####### Bootstrap 632 for bias ##########################################################
+n = nrow(test_data_freq)
+B = 250
+pred_inbag=Actual_inbag=bias_inbag=percent.bias_inbag=pred_oob= Actual_oob= bias_oob= percent.bias_oob=boot632_bias= boot632_bias_perc=numeric(B)
+
+ for(b in 1:B){
+  ib_bias = sample(1:n, size=1*n, replace=TRUE)
+  
+  ####### in sample bias calculation
+  inbag_sample_bias=test_data_freq[ib_bias,]
+  inbag_sample_bias$IDpol=as.numeric(inbag_sample_bias$IDpol)
+  inbag_sample_bias$ClaimNb=as.numeric(inbag_sample_bias$ClaimNb)
+  inbag_sample_bias$Exposure= as.numeric(inbag_sample_bias$Exposure)
+  h2o_inbag_sample_bias= as.h2o(inbag_sample_bias)
+  
+  
+  #### Freq for bias################################################################
+  pred_freq_inbag <- exp(predict(gbm_freq, newdata=inbag_sample_bias))*inbag_sample_bias$Exposure
+  
+  ### Severity part of the bias
+  Pred_severity_inbag <- as.vector(predict(gbm.severity, newdata=h2o_inbag_sample_bias))#### Predicted Severity Final
+  ### comparison step
+  orignal_data_inbag= inbag_sample_bias$ClaimAmount
+
+  predicted_premium_inbag= pred_freq_inbag*Pred_severity_inbag*inbag_sample_bias$Exposure
+  
+  pred_inbag[b]=sum(predicted_premium_inbag)
+  Actual_inbag[b]= sum(orignal_data_inbag)
+  
+  bias_inbag[b] = Actual_inbag[b]-pred_inbag[b]
+  percent.bias_inbag[b]=bias_inbag[b]/ Actual_inbag[b]
+  
+  ##### Out of bag bias evaluation ############################################ 
+  
+  oob_sample= which(!(test_data_freq$IDpol %in% inbag_sample_bias$IDpol))
+  oob_sample_bias= test_data_freq[oob_sample,]
+  oob_sample_bias$IDpol=as.numeric(oob_sample_bias$IDpol)
+  oob_sample_bias$ClaimNb=as.numeric(oob_sample_bias$ClaimNb)
+  oob_sample_bias$Exposure= as.numeric(oob_sample_bias$Exposure)
+  h2o_oob_sample_bias= as.h2o(oob_sample_bias)
+  
+  
+  #### Freq for bias###################################
+  
+  pred_freq_oob <- exp(predict(gbm_freq, newdata=oob_sample_bias))*oob_sample_bias$Exposure
+  ### Severity part of the bias
+  Pred_severity_oob <-as.vector(predict(gbm.severity, newdata=h2o_oob_sample_bias)) #### Predicted Severity Final
+  ### comparison step
+  orignal_data_oob= oob_sample_bias$ClaimAmount
+    
+  predicted_premium_oob= pred_freq_oob*Pred_severity_oob*oob_sample_bias$Exposure
+  
+  pred_oob[b]=sum(predicted_premium_oob)
+  Actual_oob[b]= sum(orignal_data_oob)
+  
+  bias_oob[b] = Actual_oob[b]-pred_oob[b]
+  percent.bias_oob[b]=bias_oob[b]/ Actual_oob[b]
+  
+  ########### Final 632 errors to be used #####################################
+  
+  boot632_bias[b] = 0.368 * bias_oob[b] + 0.632 * bias_inbag[b]
+  
+  boot632_bias_perc[b] = 0.368 * percent.bias_oob[b] + 0.632 * percent.bias_inbag[b]
+  
+}
+
+bootstrap_bias=cbind(bias_inbag,percent.bias_inbag,bias_oob,percent.bias_oob,boot632_bias, boot632_bias_perc)
+write.csv(bootstrap_bias,"bootstrap_bias.csv")
+
+
 
