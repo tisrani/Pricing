@@ -99,7 +99,12 @@ p=10
     not.interact.data=CV_data_freq[-i,]
 
 
-   #  glm_inter_test= glm(ClaimNb~Area+VehPower+VehAge+DrivAge+BonusMalus+VehBrand+VehGas+Density+Region,
+   #  glm_inter_test= glm(ClaimNb~ClaimNb~factor(pol_pay_freq)+factor(pol_payd)+factor(pol_usage)+
+  #                 factor(drv_drv2)+factor(drv_sex1)+factor(vh_fuel)+
+  #                 factor(vh_type)+(pol_duration)+(pol_sit_duration)+(drv_age1)+
+  #                 (drv_age_lic1)+(vh_age)+
+  #                 (vh_speed)+(vh_value)+(vh_weight) +(Density)+ 
+  #                 (pol_bonus)+ factor(pol_coverage),
    #                data=interact.data, offset=log(Exposure), family=poisson())
    #
    #
