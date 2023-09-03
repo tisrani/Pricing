@@ -1,1 +1,554 @@
+rm(list=ls())
+library(xgboost)
+require(MASS)
+library(CASdatasets)
+require(stats)
+library(data.table)
+library(plyr)
+library(rpart)
+library(rpart.plot)
+library(pdp)           # for partial dependence plots
+library(vip)           # for variable importance plots
+library(Hmisc)
+library(glmnet)
+library(dplyr)
+library("wesanderson")
+library(statmod)
+library(scales)
+library(xgboost)
+library(locfit)
+library(Metrics)
+library(ISLR)
+library(h2o)
+library(tidyr)
+library(tibble) 
+library(insurancerating)
+library(evtree)
+library(mgcv)
+require(MASS)
+library(CASdatasets)
+require(stats)
+library(data.table)
+# library(plyr)
+library(dplyr)
+library(purrr)
+library(rpart)
+library(rpart.plot)
+library(Hmisc)
+library(glmnet)
+library(dplyr)
+data(freMTPL2freq)
+data(freMTPL2sev)
+library("wesanderson")
+library(statmod)
+library(scales)
+data(pg17trainpol)
+data(pg17trainclaim)
+data(pg17testyear1)
+data(pg17testyear2)
+data(pg17testyear3)
+data(pg17testyear4)
+data(fredpt17)
+library(ggcorrplot)
+library(ggplot2)
+#########################
+testyear1=pg17testyear1
+testyear2=pg17testyear2
+testyear3=pg17testyear3
+testyear4=pg17testyear4
+# a1=pg17trainpol
+# a2=pg17trainclaim
+### Data cleaning done in excel, removed -ve claims amount and aggregated data and brought back the cleaned data below: 
+dat= read.csv("C:/Users/tisra/Desktop/Phd Code/11. APTP by factor/New Data set Pricing Game/R Input/Train_data_upload.csv")
+##### Adding Exclusions to the severity data #####
+dat_adj=dat[which(dat$ClaimAmount==0 |  dat$ClaimAmount>= 84.42),]
+dat_adj= dat_adj[which(dat_adj$ClaimAmount<=16770.62),]
+dat_adj= dat_adj[which(!dat_adj$ClaimAmount %in% c(56.19,60.29,75.88,103.59,106.14,110.98,130.11,618,1010.41,1236,1240.89,1442.87,2323.95,2453.28,2683.76
+)),]
+dat_adj= dat_adj[which(!dat_adj$id_policy %in% c("A00000765-V02")),]  ## Policy removed as did not have Vehicle Age 
+dat_adj$ClaimNb = ifelse(dat_adj$ClaimNb > 3, 3, dat_adj$ClaimNb)
+
+#### Character data only 
+char_cols <- sapply(dat_adj, is.character)
+dat_adj_char= dat_adj[,char_cols]
+dat_adj_char[] <- lapply(dat_adj_char, as.factor)
+dat_adj_char=dat_adj_char[,5:16]
+dat_adj_char=dat_adj_char[,c(1:4,6:10,12)]
+#### Numeric data only 
+num_cols <- sapply(dat_adj, is.numeric)
+dat_adj_num <- dat_adj[, num_cols]
+dat_adj_boxplot= cbind(dat_adj_char,dat_adj_num)
+dat_adj_boxplot$exposure =1
+dat_adj_boxplot$IDpol= dat_adj$id_policy
+##### Shuffling the data
+dat_freq=dat_adj_boxplot
+n_freq = nrow(dat_freq)
+set.seed(100)
+reord_freq = sample(1:n_freq, size=n_freq, replace=FALSE)
+dat_freq = dat_freq[reord_freq, ] 
+
+# save a validation sample for later:
+set.seed(100)
+split1= sample(1:n_freq, size=.833*n_freq, replace=FALSE)
+CV_data_freq = dat_freq[split1,]
+test_data_freq = dat_freq[-split1,]
+dev_poiss <- function(ytrue, ypred, wcase) -2 * weighted.mean(dpois(ytrue, ypred, log = TRUE) - dpois(ytrue, ytrue, log = TRUE), wcase, na.rm = TRUE)
+dev_gamma <- function(ytrue, ypred, wcase) -2 * weighted.mean(log(ytrue/ypred) - ((ytrue - ypred) / ypred), wcase, na.rm = TRUE)  
+
+##### GBM Model fitting
+hyper_grid <- expand.grid(
+  n.trees = c(2000),
+  shrinkage = c(0.1,0.01,0.001),
+  interaction.depth = c(1,2,3)
+)
+str(train_data)
+colnames(train_data)
+######## The Cross Validation loop goes in here  ####################????????????????????????????
+n = nrow(train_data)
+K = 5
+folds = cut(1:n, K, labels=FALSE)
+err.vinternal.freq=err.vout.freq= numeric(9)
+err.cv.in=err.cv.out=matrix("NA",9,5)
+pw.opt=cp.opt=err.internal=err.kfold =matrix(NA,5,10) 
+p=10
+features.xgb.freq <- setdiff( 1:length(CV_data_freq) ,  grep("drv_age_lic_avg|id_policy|drv_sex2|vh_make|
+       vh_make|drv_age2|drv_age_lic2|vh_din|vh_sale_begin|vh_sale_end|ClaimAmount|drv_age_avg|exposure|ClaimNb|
+       drv_age_lic_avg|vh_cyl", names(CV_data_freq)))
+set.seed(100)
+
+for (b in 1:p) {
+## re shuffling CV data
+ n_CV_freq = nrow(train_data)
+ reord_CVfreq = sample(1:n_CV_freq, size=n_CV_freq, replace=FALSE)
+ CV_data_freq = train_data[reord_CVfreq, ]
+  
+for(t in 1:K){
+ ##training sample
+    i = which(folds==t)
+    vtrain.data.freq=CV_data_freq[-i,]
+    valid.data.freq=CV_data_freq[i,]
+    
+    Ntr = nrow(vtrain.data.freq)
+    Ktr = 5
+    err.out.freq = numeric(9)
+    output.tr=matrix(NA,)
+    pw_cv_out=int.output.tr=pred.output.tr=matrix(NA,5,9)
+
+  for (c in 1:9) {# tuning tree model (equivalent to cv.glmnet())
+   tr.folds = cut(1:Ntr, Ktr, labels=FALSE)
+   internal.errors.tr=pdev.errors.tr = numeric(Ktr)
+ for(k in 1:Ktr){
+               ik = which(tr.folds==k)
+      vtrain.data.freq.tr = vtrain.data.freq[-ik,]
+      valid.data.freq.tr = vtrain.data.freq[ik,]
+
+      xgb_vtrain.data.freq.tr <- xgb.DMatrix(data = data.matrix(vtrain.data.freq.tr [,features.xgb.freq]), label = vtrain.data.freq.tr$ClaimNb)
+      xgb_valid.data.freq.tr <- xgb.DMatrix(data = data.matrix(valid.data.freq.tr[,features.xgb.freq]), label = valid.data.freq.tr$ClaimNb)
+
+      setinfo(xgb_vtrain.data.freq.tr,"base_margin",log(vtrain.data.freq.tr$exposure))
+      setinfo(xgb_valid.data.freq.tr,"base_margin",log(valid.data.freq.tr$exposure))
+
+     ###################################
+
+      # train model for the internal loop
+      {t1 <- proc.time()
+      fit.xgb.freq.tr <- xgb.train(data = xgb_vtrain.data.freq.tr,objective='count:poisson',nrounds = hyper_grid$n.trees[c],
+                                   max_depth = hyper_grid$interaction.depth[c],eta = hyper_grid$shrinkage[c],colsample_by_tree = 0.8,subsample = 0.9,min_child_weight = 10,
+                                   tree_method = "hist")
+
+
+      (proc.time()-t1)}
+
+      train_pred<- predict(fit.xgb.freq.tr, newdata= xgb_vtrain.data.freq.tr)
+      internal.errors.tr[k] = dev_poiss(vtrain.data.freq.tr$ClaimNb,train_pred,vtrain.data.freq.tr$exposure )
+
+
+      valid_pred=predict(fit.xgb.freq.tr, newdata =xgb_valid.data.freq.tr)
+      pdev.errors.tr[k] = dev_poiss(valid.data.freq.tr$ClaimNb,valid_pred,valid.data.freq.tr$exposure)
+
+
+           }
+
+          int.output.tr[,c]=internal.errors.tr
+          pred.output.tr[,c]=pdev.errors.tr
+          err.out.freq[c] = mean(pdev.errors.tr) # mean CV error
+        }
+
+        err.cv.out[,t]=err.out.freq
+        cp.opt[t,b] = which.min(err.out.freq)  
+      
+        #####  The external loop model coded here 
+
+  xgb_vtrain.data.freq <- xgb.DMatrix(data = data.matrix(vtrain.data.freq [,features.xgb.freq]), label = vtrain.data.freq$ClaimNb)
+  xgb_valid.data.freq <- xgb.DMatrix(data = data.matrix(valid.data.freq[,features.xgb.freq]), label = valid.data.freq$ClaimNb)
+  
+  setinfo(xgb_vtrain.data.freq,"base_margin",log(vtrain.data.freq$exposure))
+  setinfo(xgb_valid.data.freq,"base_margin",log(valid.data.freq$exposure))
+  
+  # train model
+  {t1 <- proc.time()
+    xgb_freq_cp_opt<- xgb.train(data = xgb_vtrain.data.freq,objective='count:poisson',nrounds = hyper_grid$n.trees[cp.opt[t,b]],
+                                max_depth =hyper_grid$interaction.depth[cp.opt[t,b]] ,eta = hyper_grid$shrinkage[cp.opt[t,b]],colsample_by_tree = 0.8,subsample = 0.9,min_child_weight = 10,
+                                tree_method = "hist")
+    
+      
+    (proc.time()-t1)}
+  
+########################         
+    y.internal <- predict(xgb_freq_cp_opt, newdata = xgb_vtrain.data.freq, type="response")
+    err.internal[t,b] =dev_poiss(vtrain.data.freq$ClaimNb, y.internal,vtrain.data.freq$exposure)
+    
+    y.pred <- predict(xgb_freq_cp_opt, newdata = xgb_valid.data.freq, type="response")
+    err.kfold[t,b] =dev_poiss(valid.data.freq$ClaimNb,y.pred,valid.data.freq$exposure )
+    
+  }
+
+print(b)
+ }
+
+write.csv(err.internal,"err.internal.csv")
+write.csv(err.kfold,"err.kfold.csv")
+length(features.xgb.sev)
+####################### The cross validation loop ends here 
+getmode <- function(v) {
+  uniqv <- unique(v)
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+final.cp.opt= getmode(cp.opt)
+#########   Fitting the GLM model to the train data 
+xgb_train_data <- xgb.DMatrix(data = data.matrix(train_data [,features.xgb.freq]), label = train_data$ClaimNb)
+xgb_test_data <- xgb.DMatrix(data = data.matrix(test_data[,features.xgb.freq]), label = test_data$ClaimNb)
+
+setinfo(xgb_train_data,"base_margin",log(train_data$exposure))
+setinfo(xgb_test_data,"base_margin",log(test_data$exposure))
+
+# train model
+xgb_freq_final<- xgb.train(data = xgb_train_data,objective='count:poisson',nrounds =hyper_grid$n.trees[final.cp.opt],
+                               max_depth = hyper_grid$interaction.depth[final.cp.opt],eta = hyper_grid$shrinkage[final.cp.opt],
+                               colsample_by_tree = 0.8,subsample = 0.9,min_child_weight = 10, tree_method = "hist")
+  
+var.names=colnames(train_data[features.xgb.freq])
+imp_freq_final=xgb.importance(var.names,xgb_freq_final)
+write.csv(imp_freq_final,"imp_freq_final_TP.csv")
+
+## frequency testing
+Predicted_freq_train <-predict(xgb_freq_final, newdata = xgb_train_data, type="response")
+Predicted_freq_train.error =dev_poiss(train_data$ClaimNb,Predicted_freq_train,train_data$exposure )
+
+Predicted_freq_test<- predict(xgb_freq_final, newdata = xgb_test_data, type="response")
+GLM.out.freq.err = dev_poiss(test_data$ClaimNb,Predicted_freq_test,test_data$exposure )
+final_freq=cbind(Predicted_freq_train.error,GLM.out.freq.err)
+write.csv(final_freq,"final_freq.csv")
+
+##################################################################################
+######### Boot 632 for external error on correct data  ######
+# ## Boot 632 of the external error
+n_freq_correct=nrow(test_data)
+boot632_err_outfreq_correct=err_oob_outfreq_correct=inbag_err_freqout_correct=numeric(250)
+
+ for (t in 1:250) {
+  ib = sample(1:n_freq_correct, size=1*n_freq_correct, replace=TRUE)
+  inbag_sample_outfreq=test_data[ib,]
+  xgb_inbag_sample_outfreq <- xgb.DMatrix(data = data.matrix(inbag_sample_outfreq[,features.xgb.freq]), label = inbag_sample_outfreq$ClaimNb)
+  setinfo(xgb_inbag_sample_outfreq,"base_margin",log(inbag_sample_outfreq$exposure))
+  
+  pred_inbag_outfreq <- predict(xgb_freq_final, newdata=xgb_inbag_sample_outfreq, type="response")
+  inbag_err_freqout_correct[t] =dev_poiss(inbag_sample_outfreq$ClaimNb,pred_inbag_outfreq,inbag_sample_outfreq$exposure)
+
+
+  #### oob error prediction
+
+  oob_outfreq= which(!(test_data$id_policy %in% inbag_sample_outfreq$id_policy))
+  oob_sample_outfreq= test_data[oob_outfreq,]
+  xgb_oob_sample_outfreq <- xgb.DMatrix(data = data.matrix(oob_sample_outfreq[,features.xgb.freq]), label = oob_sample_outfreq$ClaimNb)
+  setinfo(xgb_oob_sample_outfreq,"base_margin",log(oob_sample_outfreq$exposure))
+  
+  pred_oob_outfreq <- predict(xgb_freq_final, newdata=xgb_oob_sample_outfreq,type="response")
+  
+  err_oob_outfreq_correct[t] =dev_poiss(oob_sample_outfreq$ClaimNb,pred_oob_outfreq,oob_sample_outfreq$exposure)
+
+  boot632_err_outfreq_correct[t] = 0.368 * err_oob_outfreq_correct[t] + 0.632 * inbag_err_freqout_correct[t]
+
+}
+
+bootstrap_freqout_correct=cbind(boot632_err_outfreq_correct,err_oob_outfreq_correct,inbag_err_freqout_correct)
+write.csv(bootstrap_freqout_correct,"bootstrap_freqout_correct.csv")
+
+####################### Severity Model, the data setup starts here 3########
+dat_severity=dat_freq[dat_freq$ClaimAmount!=0,]
+n_severity = nrow(dat_severity)
+set.seed(1001)
+reord_sev = sample(1:n_severity, size=n_severity, replace=FALSE)
+dat_severity = dat_severity[reord_sev, ] 
+dat_severity$AverageClaim=dat_severity$ClaimAmount/dat_severity$ClaimNb
+# save a validation sample for later:
+set.seed(100)
+i.valid_sev = sample(1:n_severity, size=.833*n_severity, replace=FALSE)
+CV_data_sev = dat_severity[i.valid_sev,]
+test_data_sev = dat_severity[-i.valid_sev,]
+train_data_nonzero= CV_data_sev
+test_data_nonzero= test_data_sev
+
+################################################
+######## The Cross Validation loop goes in here  ####################????????????????????????????
+n = nrow(train_data_nonzero)
+K = 5
+folds = cut(1:n, K, labels=FALSE)
+err.vinternal.sev=err.vout.sev= numeric(9)
+err.cv.in.sev=err.cv.out.sev=matrix("NA",9,5)
+pw.opt.sev=cp.opt.sev=err.internal.sev=err.kfold.sev =matrix(NA,5,10) 
+features.xgb.sev <- setdiff( 1:length(train_data_nonzero) ,  grep("AverageClaim|id_policy|drv_sex2|
+ vh_make|vh_make|drv_age2|drv_age_lic2|vh_din|vh_sale_begin|vh_sale_end|ClaimAmount|drv_age_avg|exposure|ClaimNb|drv_age_lic_avg|id_policy|vh_cyl", names(train_data_nonzero)  ))
+
+p=10
+set.seed(100)
+ 
+for (b in 1:p) {
+# ## re shuffling CV data
+n_CV_sev = nrow(train_data_nonzero)
+reord_CVsev = sample(1:n_CV_sev, size=n_CV_sev, replace=FALSE)
+CV_data_sev = train_data_nonzero[reord_CVsev, ]
+
+for(t in 1:K){
+##training sample
+i = which(folds==t)
+vtrain.data.sev=CV_data_sev[-i,]
+valid.data.sev=CV_data_sev[i,]
+
+Ntr = nrow(vtrain.data.sev)
+Ktr = 5
+err.out.sev = numeric(9)
+pw_cv_out.sev=int.output.tr.sev=pred.output.tr.sev=matrix(NA,5,9)
+
+for (c in 1:9) {
+
+# tuning tree model (equivalent to cv.glmnet())
+tr.folds = cut(1:Ntr, Ktr, labels=FALSE)
+internal.errors.tr.sev=pdev.errors.tr.sev = numeric(Ktr)
+
+for(k in 1:Ktr){
+ik = which(tr.folds==k)
+vtrain.data.sev.tr = vtrain.data.sev[-ik,]
+valid.data.sev.tr = vtrain.data.sev[ik,]
+################### Extreme gradient boost matrix
+
+xgb_vtrain.data.sev.tr <- xgb.DMatrix(data = data.matrix(vtrain.data.sev.tr [,features.xgb.sev]), label = vtrain.data.sev.tr$AverageClaim)
+xgb_valid.data.sev.tr <- xgb.DMatrix(data = data.matrix(valid.data.sev.tr[,features.xgb.sev]), label = valid.data.sev.tr$AverageClaim)
+
+####################################  testing for the correct power
+# train model for the internal loop
+{t1 <- proc.time()
+fit.xgb.sev.tr <- xgb.train(data = xgb_vtrain.data.sev.tr,objective='reg:gamma',nrounds = hyper_grid$n.trees[c],
+                             max_depth = hyper_grid$interaction.depth[c],eta = hyper_grid$shrinkage[c],colsample_by_tree = 0.8,subsample = 0.9,min_child_weight = 10,
+                            weight=vtrain.data.sev.tr$ClaimNb)
+
+
+(proc.time()-t1)}
+
+train_pred_sev<- predict(fit.xgb.sev.tr, newdata= xgb_vtrain.data.sev.tr)
+internal.errors.tr.sev[k] = dev_gamma(vtrain.data.sev.tr$AverageClaim,train_pred_sev, vtrain.data.sev.tr$ClaimNb)
+
+valid_pred_sev=predict(fit.xgb.sev.tr, newdata =xgb_valid.data.sev.tr)
+pdev.errors.tr.sev[k] = dev_gamma(valid.data.sev.tr$AverageClaim,valid_pred_sev, valid.data.sev.tr$ClaimNb)
+
+ }
+int.output.tr.sev[,c]=internal.errors.tr.sev
+pred.output.tr.sev[,c]=pdev.errors.tr.sev
+
+err.out.sev[c] = mean(pdev.errors.tr.sev) # mean CV error
+}
+err.cv.out.sev[,t]=err.out.sev
+cp.opt.sev[t,b] = which.min(err.out.sev)
+
+#####  The external loop model coded here 
+xgb_vtrain.data.sev <- xgb.DMatrix(data = data.matrix(vtrain.data.sev [,features.xgb.sev]), label = vtrain.data.sev$AverageClaim)
+xgb_valid.data.sev <- xgb.DMatrix(data = data.matrix(valid.data.sev[,features.xgb.sev]), label = valid.data.sev$AverageClaim)
+
+# train model
+{t1 <- proc.time()
+  xgb_sev_cp_opt<- xgb.train(data = xgb_vtrain.data.sev,objective='reg:gamma',nrounds = hyper_grid$n.trees[cp.opt.sev[t,b]],
+                              max_depth =hyper_grid$interaction.depth[cp.opt.sev[t,b]] ,eta = hyper_grid$shrinkage[cp.opt.sev[t,b]],colsample_by_tree = 0.8,subsample = 0.9,min_child_weight = 10,
+                             weight=vtrain.data.sev$ClaimNb)
+  
+  
+  (proc.time()-t1)}
+
+########################         
+y.internal.sev <- predict(xgb_sev_cp_opt, newdata = xgb_vtrain.data.sev, type="response")
+err.internal.sev[t,b] =dev_gamma(vtrain.data.sev$AverageClaim, y.internal.sev,vtrain.data.sev$ClaimNb)
+
+y.pred.sev <- predict(xgb_sev_cp_opt, newdata = xgb_valid.data.sev, type="response")
+err.kfold.sev[t,b] =dev_gamma(valid.data.sev$AverageClaim,y.pred.sev,valid.data.sev$ClaimNb )
+
+}
+ print(b)
+}
+
+write.csv(err.internal.sev,"err.internal.sev.csv")
+write.csv(err.kfold.sev,"err.kfold.sev.csv")
+getmode <- function(v) {
+  uniqv <- unique(v)
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+hyper_grid
+final.cp.opt.sev= getmode(cp.opt.sev) 
+#########   Fitting the GLM model to the train data 
+xgb_train_data_sev <- xgb.DMatrix(data = data.matrix(train_data_nonzero [,features.xgb.sev]), label = train_data_nonzero$AverageClaim)
+xgb_test_data_sev <- xgb.DMatrix(data = data.matrix(test_data_nonzero[,features.xgb.sev]), label = test_data_nonzero$AverageClaim)
+length(features.xgb.sev)
+# train model
+
+xgb_sev_final<- xgb.train(data = xgb_train_data_sev,objective='reg:gamma',nrounds =hyper_grid$n.trees[final.cp.opt.sev],
+                           max_depth =hyper_grid$interaction.depth[final.cp.opt.sev],eta =hyper_grid$shrinkage[final.cp.opt.sev] ,
+                          weight=train_data_nonzero$ClaimNb)
+
+
+xgb_sev_final$feature_names
+var.names=colnames(train_data[features.xgb.sev])
+imp_sev_final=xgb.importance(var.names,xgb_sev_final)
+write.csv(imp_sev_final,"imp_sev_final_TP.csv")
+
+## frequency testing
+Predicted_sev_train <-predict(xgb_sev_final, newdata = xgb_train_data_sev, type="response")
+Predicted_sev_train.error =dev_gamma(train_data_nonzero$AverageClaim,Predicted_sev_train,train_data_nonzero$ClaimNb)
+
+Predicted_sev_test<- predict(xgb_sev_final, newdata = xgb_test_data_sev, type="response")
+GLM.out.sev.err = dev_gamma(test_data_nonzero$AverageClaim,Predicted_sev_test,test_data_nonzero$ClaimNb)
+
+###### Premiums to be used for APTP Analysis
+# Predicted_sev_test_full= predict(xgb_sev_final, newdata = xgb_test_data, type="response")
+# Predicted_sev_train_full= predict(xgb_sev_final, newdata =xgb_train_data, type="response")
+# 
+# 
+# Prem_train= Predicted_sev_train_full * Predicted_freq_train
+# Prem_test= Predicted_sev_test_full * Predicted_freq_test
+# train_data$Prem_train=Prem_train
+# test_data$Prem_test=Prem_test
+# 
+# write.csv(train_data,"train_data_download.csv")
+# write.csv(test_data,"test_data_download.csv")
+# data_download= rbind(train_data,test_data)
+# write.csv(Predicted_sev_correct,"Predicted_sev_correct.csv")
+# final_sev=cbind(Predicted_sev_train.error,GLM.out.sev.err)
+# write.csv(final_sev,"final_sev.csv")
+###########################################################################
+## Boot 632 of the external error
+
+n_sev=nrow(test_data_nonzero)
+boot632_err_outsev=err_oob_outsev=inbag_err_sevout=numeric(250)
+
+for (t in 1:250) {
+
+  ib_sev = sample(1:n_sev, size=1*n_sev, replace=TRUE)
+  inbag_sample_outsev=test_data_nonzero[ib_sev,]
+  xgb_inbag_sample_outsev <- xgb.DMatrix(data = data.matrix(inbag_sample_outsev [,features.xgb.sev]), label = inbag_sample_outsev$AverageClaim)
+
+  pred_inbag_outsev <- predict(xgb_sev_final, newdata=xgb_inbag_sample_outsev,type="response")
+  inbag_err_sevout[t] =dev_gamma(inbag_sample_outsev$AverageClaim,pred_inbag_outsev,inbag_sample_outsev$ClaimNb)
+  
+  #### oob error prediction
+  
+  oob_outsev= which(!(test_data_nonzero$id_policy %in% inbag_sample_outsev$id_policy))     
+  oob_sample_outsev= test_data_nonzero[oob_outsev,]
+  
+  xgb_oob_sample_outsev <- xgb.DMatrix(data = data.matrix(oob_sample_outsev [,features.xgb.sev]), label = oob_sample_outsev$AverageClaim)
+  pred_oob_outsev <- predict(xgb_sev_final, newdata=xgb_oob_sample_outsev,type="response")
+  err_oob_outsev[t] = dev_gamma(oob_sample_outsev$AverageClaim,pred_oob_outsev,oob_sample_outsev$ClaimNb)
+  
+  boot632_err_outsev [t] = 0.368 * err_oob_outsev[t] + 0.632 * inbag_err_sevout[t]
+  
+}
+bootstrap_sevout=cbind(boot632_err_outsev,err_oob_outsev,inbag_err_sevout)
+write.csv(bootstrap_sevout,"bootstrap_sevout.csv")
+range_sevout= cbind(quantile(boot632_err_outsev,0.025),quantile(boot632_err_outsev,0.975))
+boxplot(boot632_err_outsev)
+###################### Overall Premium will start here 
+####### Taking the original Frequency test data to get the final prediction of premium#################
+test_data
+#y.pred.freq <- predict(lasso_best.freq, s = best_lam, newx = x.test.freq, newoffset= log(x.test.expo), type="response")
+Predicted_freq_test ### Predicted claims frequency 
+#### Without base margin data created for severity 
+xgb_test_data_freq_sev=xgb.DMatrix(data = data.matrix(test_data [,features.xgb.sev]), label = test_data$ClaimNb)
+Pred_severity <- predict(xgb_sev_final, newdata=xgb_test_data_freq_sev,type="response") #### Predicted Severity Final 
+orignal_data= test_data$ClaimAmount
+
+predicted_premium= Predicted_freq_test*Pred_severity*test_data$exposure
+a1= sum(predicted_premium)
+a2=sum(orignal_data)
+a1-a2
+error_prem= (a1-a2)/a1 
+
+write.csv(predicted_premium,"predicted_prem_xgb.csv")
+write.csv(test_data_freq, "test_data_xgb.csv")
+write.csv(orignal_data,"orignal_data_xgb.csv")
+
+####### Bootstrap 632 for bias ##########################################################
+n = nrow(test_data)
+B = 250
+pred_inbag=Actual_inbag=bias_inbag=percent.bias_inbag=pred_oob= Actual_oob= bias_oob= percent.bias_oob=boot632_bias= boot632_bias_perc=numeric(B)
+
+for(b in 1:B){
+  ib_bias = sample(1:n, size=1*n, replace=TRUE)
+  
+  ####### in sample bias calculation
+  inbag_sample_bias=test_data[ib_bias,]
+  xgb_inbag_sample_sev_bias <- xgb.DMatrix(data = data.matrix(inbag_sample_bias [,features.xgb.sev]), label = inbag_sample_bias$ClaimNb)
+  xgb_inbag_sample_freq_bias <- xgb.DMatrix(data = data.matrix(inbag_sample_bias [,features.xgb.freq]), label = inbag_sample_bias$ClaimNb)
+  setinfo(xgb_inbag_sample_freq_bias,"base_margin",log(inbag_sample_bias$exposure))
+  
+  #### Freq for bias################################################################
+  
+  pred_freq_inbag <- predict(xgb_freq_final, newdata=xgb_inbag_sample_freq_bias,type="response")
+  ### Severity part of the bias
+  Pred_severity_inbag <- predict(xgb_sev_final, newdata=xgb_inbag_sample_sev_bias,type="response") #### Predicted Severity Final
+  ### comparison step
+  orignal_data_inbag= inbag_sample_bias$ClaimAmount
+  
+  predicted_premium_inbag= pred_freq_inbag*Pred_severity_inbag*inbag_sample_bias$exposure
+  
+  pred_inbag[b]=sum(predicted_premium_inbag)
+  Actual_inbag[b]= sum(orignal_data_inbag)
+  
+  bias_inbag[b] = Actual_inbag[b]-pred_inbag[b]
+  percent.bias_inbag[b]=bias_inbag[b]/ Actual_inbag[b]
+  
+  ##### Out of bag bias evaluation ############################################ 
+  
+  oob_sample= which(!(test_data$id_policy %in% inbag_sample_bias$id_policy))
+  oob_sample_bias= test_data[oob_sample,]
+  
+  #### Freq for bias###################################
+  xgb_oob_sample_sev_bias <- xgb.DMatrix(data = data.matrix(oob_sample_bias [,features.xgb.sev]), label = oob_sample_bias$ClaimNb)
+
+  xgb_oob_sample_freq_bias <- xgb.DMatrix(data = data.matrix(oob_sample_bias [,features.xgb.freq]), label = oob_sample_bias$ClaimNb)
+  setinfo(xgb_oob_sample_freq_bias,"base_margin",log(oob_sample_bias$exposure))
+  
+  
+  pred_freq_oob <- predict(xgb_freq_final, newdata=xgb_oob_sample_freq_bias,type="response")
+  ### Severity part of the bias
+  Pred_severity_oob <- predict(xgb_sev_final, newdata=xgb_oob_sample_sev_bias,type="response") #### Predicted Severity Final
+  ### comparison step
+  orignal_data_oob= oob_sample_bias$ClaimAmount
+  
+  predicted_premium_oob= pred_freq_oob*Pred_severity_oob*oob_sample_bias$exposure
+  
+  pred_oob[b]=sum(predicted_premium_oob)
+  Actual_oob[b]= sum(orignal_data_oob)
+  
+  bias_oob[b] = Actual_oob[b]-pred_oob[b]
+  percent.bias_oob[b]=bias_oob[b]/ Actual_oob[b]
+  
+  ########### Final 632 errors to be used #####################################
+  
+  boot632_bias[b] = 0.368 * bias_oob[b] + 0.632 * bias_inbag[b]
+  
+  boot632_bias_perc[b] = 0.368 * percent.bias_oob[b] + 0.632 * percent.bias_inbag[b]
+  
+}
+bootstrap_bias=cbind(bias_inbag,percent.bias_inbag,bias_oob,percent.bias_oob,boot632_bias, boot632_bias_perc)
+write.csv(bootstrap_bias,"bootstrap_bias.csv")
+
+mean(boot632_bias_perc)
+
 
